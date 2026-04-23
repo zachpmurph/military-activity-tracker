@@ -222,6 +222,168 @@ def detect_spikes(cursor):
         print(row)
 
 
+def detect_new_entries(cursor):
+    print("\n--- New Aircraft Activity (Last 30 Minutes) ---")
+
+    recent_cutoff = time.time() - 1800
+    baseline_start = recent_cutoff - (6 * 3600)
+    baseline_end = recent_cutoff - (2 * 3600)
+
+    cursor.execute("""
+        WITH recent_presence AS (
+            SELECT
+                icao24,
+                ROUND(lat, 1) AS lat_bin,
+                ROUND(lon, 1) AS lon_bin,
+                MAX(type) AS type
+            FROM aircraft_positions
+            WHERE timestamp >= ?
+            GROUP BY icao24, lat_bin, lon_bin
+        ),
+        baseline_presence AS (
+            SELECT
+                icao24,
+                ROUND(lat, 1) AS lat_bin,
+                ROUND(lon, 1) AS lon_bin
+            FROM aircraft_positions
+            WHERE timestamp BETWEEN ? AND ?
+            GROUP BY icao24, lat_bin, lon_bin
+        ),
+        new_entries AS (
+            SELECT
+                recent_presence.icao24,
+                recent_presence.lat_bin,
+                recent_presence.lon_bin,
+                recent_presence.type
+            FROM recent_presence
+            LEFT JOIN baseline_presence
+                ON recent_presence.icao24 = baseline_presence.icao24
+               AND recent_presence.lat_bin = baseline_presence.lat_bin
+               AND recent_presence.lon_bin = baseline_presence.lon_bin
+            WHERE baseline_presence.icao24 IS NULL
+        )
+        SELECT
+            lat_bin,
+            lon_bin,
+            COUNT(DISTINCT icao24) AS new_aircraft,
+            COUNT(DISTINCT CASE
+                WHEN type LIKE '%CARGO%' OR type LIKE '%MIL%' THEN icao24
+            END) AS new_military
+        FROM new_entries
+        GROUP BY lat_bin, lon_bin
+        HAVING new_aircraft >= 2
+        ORDER BY new_military DESC, new_aircraft DESC
+        LIMIT 10;
+    """, (recent_cutoff, baseline_start, baseline_end))
+
+    for row in cursor.fetchall():
+        print(row)
+
+
+def detect_movements(cursor):
+    print("\n--- Cross-Region Movements (Last 2 Hours) ---")
+
+    end_time = time.time()
+    start_time = end_time - (2 * 3600)
+
+    cursor.execute("""
+        WITH recent_positions AS (
+            SELECT
+                icao24,
+                ROUND(lat, 1) AS lat_bin,
+                ROUND(lon, 1) AS lon_bin,
+                timestamp,
+                type
+            FROM aircraft_positions
+            WHERE timestamp BETWEEN ? AND ?
+        ),
+        aircraft_times AS (
+            SELECT
+                icao24,
+                MIN(timestamp) AS first_seen,
+                MAX(timestamp) AS last_seen
+            FROM recent_positions
+            GROUP BY icao24
+        ),
+        movements AS (
+            SELECT
+                aircraft_times.icao24,
+                start_pos.lat_bin AS from_lat,
+                start_pos.lon_bin AS from_lon,
+                end_pos.lat_bin AS to_lat,
+                end_pos.lon_bin AS to_lon,
+                MAX(end_pos.type) AS type,
+                SQRT(
+                    ((end_pos.lat_bin - start_pos.lat_bin) * (end_pos.lat_bin - start_pos.lat_bin)) +
+                    ((end_pos.lon_bin - start_pos.lon_bin) * (end_pos.lon_bin - start_pos.lon_bin))
+                ) AS movement_distance,
+                CASE
+                    WHEN SQRT(
+                        ((end_pos.lat_bin - start_pos.lat_bin) * (end_pos.lat_bin - start_pos.lat_bin)) +
+                        ((end_pos.lon_bin - start_pos.lon_bin) * (end_pos.lon_bin - start_pos.lon_bin))
+                    ) >= 1.0 THEN 1
+                    ELSE 0
+                END AS long_move
+            FROM aircraft_times
+            JOIN recent_positions AS start_pos
+                ON aircraft_times.icao24 = start_pos.icao24
+               AND aircraft_times.first_seen = start_pos.timestamp
+            JOIN recent_positions AS end_pos
+                ON aircraft_times.icao24 = end_pos.icao24
+               AND aircraft_times.last_seen = end_pos.timestamp
+            WHERE start_pos.lat_bin != end_pos.lat_bin
+               OR start_pos.lon_bin != end_pos.lon_bin
+            GROUP BY
+                aircraft_times.icao24,
+                start_pos.lat_bin,
+                start_pos.lon_bin,
+                end_pos.lat_bin,
+                end_pos.lon_bin
+        ),
+        filtered_movements AS (
+            SELECT
+                icao24,
+                from_lat,
+                from_lon,
+                to_lat,
+                to_lon,
+                type,
+                movement_distance,
+                long_move
+            FROM movements
+            WHERE movement_distance >= 0.3
+              AND (
+                  movement_distance >= 0.5
+                  OR type LIKE '%CARGO%'
+                  OR type LIKE '%MIL%'
+              )
+        )
+        SELECT
+            from_lat,
+            from_lon,
+            to_lat,
+            to_lon,
+            COUNT(DISTINCT icao24) AS aircraft_moved,
+            COUNT(DISTINCT CASE
+                WHEN type LIKE '%CARGO%' OR type LIKE '%MIL%' THEN icao24
+            END) AS military_moved,
+            ROUND(AVG(movement_distance), 1) AS avg_distance
+        FROM filtered_movements
+        GROUP BY from_lat, from_lon, to_lat, to_lon
+        HAVING aircraft_moved >= 2
+           AND (
+               military_moved >= 1
+               OR AVG(movement_distance) >= 0.5
+               OR SUM(long_move) >= 1
+           )
+        ORDER BY military_moved DESC, avg_distance DESC, aircraft_moved DESC
+        LIMIT 10;
+    """, (start_time, end_time))
+
+    for row in cursor.fetchall():
+        print(row)
+
+
 def _capture_region_rows(query_func, cursor):
     output = io.StringIO()
 
@@ -347,6 +509,8 @@ def main():
     military_cluster(cursor)
     recurring_regions(cursor)
     rank_regions(cursor)
+    detect_new_entries(cursor)
+    detect_movements(cursor)
 
     conn.close()    # ✅ Use ONE consistent database path
     conn = sqlite3.connect("data/aircraft.db")

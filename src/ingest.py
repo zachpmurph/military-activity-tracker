@@ -1,3 +1,4 @@
+import math
 import time
 import sqlite3
 from collections import defaultdict
@@ -21,6 +22,20 @@ CREATE TABLE IF NOT EXISTS aircraft_positions (
     type TEXT,
     behavior TEXT,
     score INTEGER
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS aircraft_tracks (
+    icao24 TEXT,
+    first_seen REAL,
+    last_seen REAL,
+    start_lat REAL,
+    start_lon REAL,
+    end_lat REAL,
+    end_lon REAL,
+    max_distance REAL,
+    PRIMARY KEY (icao24)
 )
 """)
 
@@ -163,11 +178,55 @@ def compute_score(a, behavior):
 
     return score
 
+
+def update_aircraft_track(a, now):
+    icao24 = a.get("icao24")
+    lat = a.get("lat")
+    lon = a.get("lon")
+
+    if not icao24 or lat is None or lon is None:
+        return
+
+    existing_track = cursor.execute("""
+        SELECT first_seen, start_lat, start_lon, max_distance
+        FROM aircraft_tracks
+        WHERE icao24 = ?
+    """, (icao24,)).fetchone()
+
+    if not existing_track:
+        cursor.execute("""
+            INSERT INTO aircraft_tracks
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (icao24, now, now, lat, lon, lat, lon, 0.0))
+        return
+
+    first_seen, start_lat, start_lon, max_distance = existing_track
+    distance = math.sqrt(((lat - start_lat) ** 2) + ((lon - start_lon) ** 2))
+
+    cursor.execute("""
+        UPDATE aircraft_tracks
+        SET last_seen = ?,
+            end_lat = ?,
+            end_lon = ?,
+            max_distance = ?
+        WHERE icao24 = ?
+    """, (now, lat, lon, max(max_distance, distance), icao24))
+
+
+def cleanup_old_tracks(now):
+    cutoff = now - (6 * 3600)
+    cursor.execute("""
+        DELETE FROM aircraft_tracks
+        WHERE last_seen < ?
+    """, (cutoff,))
+
 # --- STORE ---
 def store_aircraft(aircraft_list):
     now = time.time()
 
     for a in aircraft_list:
+        update_aircraft_track(a, now)
+
         classification = classify_aircraft(a)
         behavior = detect_behavior(a)
         score = compute_score(a, behavior)
@@ -191,6 +250,7 @@ def store_aircraft(aircraft_list):
             score
         ))
 
+    cleanup_old_tracks(now)
     conn.commit()
 
 # --- FUSION ---
