@@ -105,6 +105,44 @@ def military_cluster(cursor):
     for row in cursor.fetchall():
         print(row)
 
+
+def recurring_regions(cursor):
+    print("\n--- Recurring Activity Regions (Last 6 Hours) ---")
+
+    cutoff = time.time() - (6 * 3600)
+
+    cursor.execute("""
+        WITH bucket_clusters AS (
+            SELECT
+                ROUND(lat, 1) AS lat_bin,
+                ROUND(lon, 1) AS lon_bin,
+                CAST(timestamp / 1800 AS INTEGER) AS bucket,
+                COUNT(DISTINCT icao24) AS aircraft_count,
+                COUNT(DISTINCT CASE
+                    WHEN type IN ('US_CARGO', 'UK_CARGO', 'TANKER') THEN icao24
+                END) AS military_count,
+                AVG(score) AS avg_score
+            FROM aircraft_positions
+            WHERE timestamp > ?
+            GROUP BY bucket, lat_bin, lon_bin
+            HAVING aircraft_count >= 3
+        )
+        SELECT
+            lat_bin,
+            lon_bin,
+            COUNT(DISTINCT bucket) AS appearances,
+            SUM(aircraft_count) AS total_aircraft,
+            SUM(military_count) AS military_presence
+        FROM bucket_clusters
+        GROUP BY lat_bin, lon_bin
+        HAVING appearances >= 3
+        ORDER BY appearances DESC, military_presence DESC
+        LIMIT 10;
+    """, (cutoff,))
+
+    for row in cursor.fetchall():
+        print(row)
+
 # ----------------------------
 # Main
 # ----------------------------
@@ -136,6 +174,7 @@ def main():
 
     # 🔥 NEW LINE
     military_cluster(cursor)
+    recurring_regions(cursor)
 
     conn.close()    # ✅ Use ONE consistent database path
     conn = sqlite3.connect("data/aircraft.db")
