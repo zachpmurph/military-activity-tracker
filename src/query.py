@@ -1,5 +1,8 @@
+import ast
+import io
 import sqlite3
 import time
+from contextlib import redirect_stdout
 
 # ----------------------------
 # Queries
@@ -143,6 +146,174 @@ def recurring_regions(cursor):
     for row in cursor.fetchall():
         print(row)
 
+
+def coordinated_activity(cursor):
+    print("\n--- Coordinated Activity Regions (Last 30 Minutes) ---")
+
+    cutoff = time.time() - 1800
+
+    cursor.execute("""
+        SELECT
+            ROUND(lat, 1) AS lat_bin,
+            ROUND(lon, 1) AS lon_bin,
+            COUNT(DISTINCT icao24) AS aircraft_count,
+            COUNT(DISTINCT CASE
+                WHEN type IN ('US_CARGO', 'UK_CARGO', 'TANKER') THEN icao24
+            END) AS military_count
+        FROM aircraft_positions
+        WHERE timestamp > ?
+        GROUP BY lat_bin, lon_bin
+        HAVING aircraft_count >= 3
+        ORDER BY military_count DESC, aircraft_count DESC
+        LIMIT 10;
+    """, (cutoff,))
+
+    for row in cursor.fetchall():
+        print(row)
+
+
+def detect_spikes(cursor):
+    print("\n--- Activity Spikes (Last 30 Minutes) ---")
+
+    now = time.time()
+    current_cutoff = now - 1800
+    previous_cutoff = now - 3600
+
+    cursor.execute("""
+        WITH current_window AS (
+            SELECT
+                ROUND(lat, 1) AS lat_bin,
+                ROUND(lon, 1) AS lon_bin,
+                COUNT(DISTINCT icao24) AS aircraft_count,
+                COUNT(DISTINCT CASE
+                    WHEN type IN ('US_CARGO', 'UK_CARGO', 'TANKER') THEN icao24
+                END) AS military_count
+            FROM aircraft_positions
+            WHERE timestamp > ?
+            GROUP BY lat_bin, lon_bin
+        ),
+        previous_window AS (
+            SELECT
+                ROUND(lat, 1) AS lat_bin,
+                ROUND(lon, 1) AS lon_bin,
+                COUNT(DISTINCT icao24) AS aircraft_count
+            FROM aircraft_positions
+            WHERE timestamp > ? AND timestamp <= ?
+            GROUP BY lat_bin, lon_bin
+        )
+        SELECT
+            current_window.lat_bin,
+            current_window.lon_bin,
+            current_window.aircraft_count,
+            current_window.military_count
+        FROM current_window
+        LEFT JOIN previous_window
+            ON current_window.lat_bin = previous_window.lat_bin
+           AND current_window.lon_bin = previous_window.lon_bin
+        WHERE current_window.aircraft_count >= 3
+          AND current_window.aircraft_count > COALESCE(previous_window.aircraft_count, 0)
+        ORDER BY
+            (current_window.aircraft_count - COALESCE(previous_window.aircraft_count, 0)) DESC,
+            current_window.military_count DESC
+        LIMIT 10;
+    """, (current_cutoff, previous_cutoff, current_cutoff))
+
+    for row in cursor.fetchall():
+        print(row)
+
+
+def _capture_region_rows(query_func, cursor):
+    output = io.StringIO()
+
+    with redirect_stdout(output):
+        query_func(cursor)
+
+    rows = []
+    for line in output.getvalue().splitlines():
+        line = line.strip()
+        if not line.startswith("("):
+            continue
+
+        try:
+            row = ast.literal_eval(line)
+        except (SyntaxError, ValueError):
+            continue
+
+        if isinstance(row, tuple):
+            rows.append(row)
+
+    return rows
+
+
+def rank_regions(cursor):
+    print("\n--- PRIORITY REGIONS ---")
+
+    regions = {}
+
+    def get_region(lat, lon):
+        key = (round(lat, 1), round(lon, 1))
+        if key not in regions:
+            regions[key] = {
+                "aircraft_count": 0,
+                "military_count": 0,
+                "spike_flag": 0,
+                "recurring_count": 0,
+                "coordinated_flag": 0,
+            }
+        return regions[key]
+
+    for lat, lon, aircraft_count, military_count in _capture_region_rows(coordinated_activity, cursor):
+        region = get_region(lat, lon)
+        region["aircraft_count"] = max(region["aircraft_count"], aircraft_count)
+        region["military_count"] = max(region["military_count"], military_count)
+        region["coordinated_flag"] = 1
+
+    for lat, lon, aircraft_count, military_count in _capture_region_rows(detect_spikes, cursor):
+        region = get_region(lat, lon)
+        region["aircraft_count"] = max(region["aircraft_count"], aircraft_count)
+        region["military_count"] = max(region["military_count"], military_count)
+        region["spike_flag"] = 1
+
+    for lat, lon, appearances, total_aircraft, military_presence in _capture_region_rows(recurring_regions, cursor):
+        region = get_region(lat, lon)
+        region["aircraft_count"] = max(region["aircraft_count"], total_aircraft)
+        region["military_count"] = max(region["military_count"], military_presence)
+        region["recurring_count"] = max(region["recurring_count"], appearances)
+
+    ranked_regions = []
+    for (lat, lon), region in regions.items():
+        score = (
+            (region["military_count"] * 4)
+            + (region["aircraft_count"] * 0.2)
+            + (region["spike_flag"] * 5)
+            + (region["recurring_count"] * 1.5)
+            + (region["coordinated_flag"] * 2)
+        )
+
+        if region["military_count"] == 0:
+            score = score * 0.4
+
+        if region["military_count"] < 1 and region["spike_flag"] != 1:
+            continue
+
+        if score < 5:
+            continue
+
+        ranked_regions.append((
+            lat,
+            lon,
+            round(score, 1),
+            region["aircraft_count"],
+            region["military_count"],
+            region["spike_flag"],
+            region["recurring_count"],
+        ))
+
+    ranked_regions.sort(key=lambda row: row[2], reverse=True)
+
+    for row in ranked_regions[:10]:
+        print(row)
+
 # ----------------------------
 # Main
 # ----------------------------
@@ -175,6 +346,7 @@ def main():
     # 🔥 NEW LINE
     military_cluster(cursor)
     recurring_regions(cursor)
+    rank_regions(cursor)
 
     conn.close()    # ✅ Use ONE consistent database path
     conn = sqlite3.connect("data/aircraft.db")

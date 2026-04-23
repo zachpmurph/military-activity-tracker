@@ -88,5 +88,42 @@ class RecurringRegionsTests(unittest.TestCase):
         self.assertNotIn("(40.0, -75.0, 2, 6, 0)", lines)
 
 
+class RankRegionsTests(unittest.TestCase):
+    def test_rank_regions_combines_region_signals(self):
+        def fake_coordinated_activity(cursor):
+            print("\n--- Coordinated Activity Regions ---")
+            print((34.12, -117.24, 4, 2))
+            print((40.01, -75.01, 2, 0))
+            print((42.01, -78.02, 5, 0))
+
+        def fake_detect_spikes(cursor):
+            print("\n--- Activity Spikes ---")
+            print((34.08, -117.18, 6, 4))
+            print((41.0, -76.0, 1, 0))
+            print((42.03, -78.04, 5, 0))
+
+        def fake_recurring_regions(cursor):
+            print("\n--- Recurring Activity Regions (Last 6 Hours) ---")
+            print((34.1, -117.2, 4, 9, 5))
+            print((39.0, -77.0, 1, 2, 0))
+            print((42.0, -78.0, 3, 5, 0))
+
+        output = io.StringIO()
+        with patch.object(query, "coordinated_activity", side_effect=fake_coordinated_activity, create=True):
+            with patch.object(query, "detect_spikes", side_effect=fake_detect_spikes, create=True):
+                with patch.object(query, "recurring_regions", side_effect=fake_recurring_regions):
+                    with redirect_stdout(output):
+                        query.rank_regions(None)
+
+        lines = [line.strip() for line in output.getvalue().splitlines() if line.strip()]
+
+        self.assertEqual(lines[0], "--- PRIORITY REGIONS ---")
+        self.assertIn("(34.1, -117.2, 34.8, 9, 5, 1, 4)", lines)
+        self.assertIn("(42.0, -78.0, 5.0, 5, 0, 1, 3)", lines)
+        self.assertNotIn("(39.0, -77.0, 2.5, 2, 0, 0, 1)", lines)
+        self.assertNotIn("(40.0, -75.0, 3.0, 2, 0, 0, 0)", lines)
+        self.assertNotIn("(41.0, -76.0, 2.1, 1, 0, 1, 0)", lines)
+
+
 if __name__ == "__main__":
     unittest.main()
