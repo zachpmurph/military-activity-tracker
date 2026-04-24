@@ -1,8 +1,6 @@
-import ast
-import io
 import sqlite3
 import time
-from contextlib import redirect_stdout
+from pathlib import Path
 
 from detection.clusters import (
     coordinated_activity,
@@ -19,13 +17,15 @@ from detection.staging import detect_staging_and_projection
 # ----------------------------
 
 def most_suspicious(cursor):
+    cutoff = time.time() - 21600
     cursor.execute("""
     SELECT callsign, type, behavior, AVG(score) as avg_score, COUNT(*) as sightings
     FROM aircraft_positions
+    WHERE timestamp > ?
     GROUP BY icao24
     ORDER BY avg_score DESC, sightings DESC
     LIMIT 10
-    """)
+    """, (cutoff,))
     return cursor.fetchall()
 
 
@@ -45,14 +45,15 @@ def recent_activity(cursor):
 
 
 def loitering(cursor):
+    cutoff = time.time() - 21600
     cursor.execute("""
     SELECT callsign, COUNT(*) as sightings
     FROM aircraft_positions
-    WHERE behavior = 'LOITERING'
+    WHERE behavior = 'LOITERING' AND timestamp > ?
     GROUP BY icao24
     ORDER BY sightings DESC
     LIMIT 10
-    """)
+    """, (cutoff,))
     return cursor.fetchall()
 
 
@@ -116,29 +117,6 @@ def military_cluster(cursor):
 # Region ranking (stays here so test patches on this module's globals work)
 # ----------------------------
 
-def _capture_region_rows(query_func, cursor):
-    output = io.StringIO()
-
-    with redirect_stdout(output):
-        query_func(cursor)
-
-    rows = []
-    for line in output.getvalue().splitlines():
-        line = line.strip()
-        if not line.startswith("("):
-            continue
-
-        try:
-            row = ast.literal_eval(line)
-        except (SyntaxError, ValueError):
-            continue
-
-        if isinstance(row, tuple):
-            rows.append(row)
-
-    return rows
-
-
 def rank_regions(cursor):
     print("\n--- PRIORITY REGIONS ---")
 
@@ -156,19 +134,19 @@ def rank_regions(cursor):
             }
         return regions[key]
 
-    for lat, lon, aircraft_count, military_count in _capture_region_rows(coordinated_activity, cursor):
+    for lat, lon, aircraft_count, military_count in coordinated_activity(cursor):
         region = get_region(lat, lon)
         region["aircraft_count"] = max(region["aircraft_count"], aircraft_count)
         region["military_count"] = max(region["military_count"], military_count)
         region["coordinated_flag"] = 1
 
-    for lat, lon, aircraft_count, military_count in _capture_region_rows(detect_spikes, cursor):
+    for lat, lon, aircraft_count, military_count in detect_spikes(cursor):
         region = get_region(lat, lon)
         region["aircraft_count"] = max(region["aircraft_count"], aircraft_count)
         region["military_count"] = max(region["military_count"], military_count)
         region["spike_flag"] = 1
 
-    for lat, lon, appearances, total_aircraft, military_presence in _capture_region_rows(recurring_regions, cursor):
+    for lat, lon, appearances, total_aircraft, military_presence in recurring_regions(cursor):
         region = get_region(lat, lon)
         region["aircraft_count"] = max(region["aircraft_count"], total_aircraft)
         region["military_count"] = max(region["military_count"], military_presence)
@@ -213,7 +191,8 @@ def rank_regions(cursor):
 # ----------------------------
 
 def main():
-    conn = sqlite3.connect("data/aircraft.db")
+    db_path = Path(__file__).resolve().parent / "data" / "aircraft.db"
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
     cursor.execute("SELECT timestamp FROM aircraft_positions ORDER BY timestamp DESC LIMIT 5;")

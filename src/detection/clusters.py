@@ -1,7 +1,4 @@
-import ast
-import io
 import time
-from contextlib import redirect_stdout
 
 
 def recurring_regions(cursor):
@@ -38,8 +35,10 @@ def recurring_regions(cursor):
         LIMIT 10;
     """, (cutoff,))
 
-    for row in cursor.fetchall():
+    rows = cursor.fetchall()
+    for row in rows:
         print(row)
+    return rows
 
 
 def coordinated_activity(cursor):
@@ -63,8 +62,10 @@ def coordinated_activity(cursor):
         LIMIT 10;
     """, (cutoff,))
 
-    for row in cursor.fetchall():
+    rows = cursor.fetchall()
+    for row in rows:
         print(row)
+    return rows
 
 
 def detect_spikes(cursor):
@@ -113,8 +114,10 @@ def detect_spikes(cursor):
         LIMIT 10;
     """, (current_cutoff, previous_cutoff, current_cutoff))
 
-    for row in cursor.fetchall():
+    rows = cursor.fetchall()
+    for row in rows:
         print(row)
+    return rows
 
 
 def detect_new_entries(cursor):
@@ -175,24 +178,3 @@ def detect_new_entries(cursor):
         print(row)
 
 
-def _capture_region_rows(query_func, cursor):
-    output = io.StringIO()
-
-    with redirect_stdout(output):
-        query_func(cursor)
-
-    rows = []
-    for line in output.getvalue().splitlines():
-        line = line.strip()
-        if not line.startswith("("):
-            continue
-
-        try:
-            row = ast.literal_eval(line)
-        except (SyntaxError, ValueError):
-            continue
-
-        if isinstance(row, tuple):
-            rows.append(row)
-
-    return rows
