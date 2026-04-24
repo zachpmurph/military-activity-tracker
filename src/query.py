@@ -10,7 +10,7 @@ from detection.clusters import (
     detect_spikes,
     recurring_regions,
 )
-from detection.changes import detect_activity_changes
+from detection.changes import detect_activity_changes, detect_linked_regions
 from detection.movements import detect_movements
 from detection.staging import detect_staging_and_projection
 
@@ -240,6 +240,7 @@ def main():
     detect_movements(cursor)
     detect_staging_and_projection(cursor)
     detect_activity_changes(cursor)
+    detect_linked_regions(cursor)
 
     conn.close()
 

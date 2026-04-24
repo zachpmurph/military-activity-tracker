@@ -1,4 +1,4 @@
-def merge_regions(snapshot):
+def merge_regions(snapshot, radius=0.2):
     merged_regions = []
     visited = set()
 
@@ -20,8 +20,8 @@ def merge_regions(snapshot):
                     continue
 
                 if (
-                    abs(current_cluster["lat_bin"] - other_cluster["lat_bin"]) <= 0.2
-                    and abs(current_cluster["lon_bin"] - other_cluster["lon_bin"]) <= 0.2
+                    abs(current_cluster["lat_bin"] - other_cluster["lat_bin"]) <= radius
+                    and abs(current_cluster["lon_bin"] - other_cluster["lon_bin"]) <= radius
                 ):
                     visited.add(other_index)
                     pending.append(other_index)
