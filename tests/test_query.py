@@ -211,5 +211,121 @@ class DetectMovementsTests(RecurringRegionsTests):
         self.assertNotIn("(38.1, -121.1, 38.1, -121.1, 1, 0, 0.0)", lines)
 
 
+class DetectStagingAndProjectionTests(RecurringRegionsTests):
+    def setUp(self):
+        super().setUp()
+        self.cursor.execute("""
+            CREATE TABLE aircraft_tracks (
+                icao24 TEXT,
+                first_seen REAL,
+                last_seen REAL,
+                start_lat REAL,
+                start_lon REAL,
+                end_lat REAL,
+                end_lon REAL,
+                max_distance REAL,
+                type TEXT,
+                PRIMARY KEY (icao24)
+            )
+        """)
+
+    def insert_track(self, icao24, first_seen, last_seen, start_lat, start_lon, end_lat, end_lon, max_distance, aircraft_type):
+        self.cursor.execute("""
+            INSERT INTO aircraft_tracks
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            icao24,
+            first_seen,
+            last_seen,
+            start_lat,
+            start_lon,
+            end_lat,
+            end_lon,
+            max_distance,
+            aircraft_type,
+        ))
+
+    def test_detect_staging_and_projection_reports_regions_and_flows(self):
+        now = 300_000
+        tracks = [
+            ("t1", now - 20_000, now - 100, 34.11, -117.11, 35.11, -118.11, 1.4, "US_CARGO"),
+            ("t2", now - 19_500, now - 120, 34.12, -117.14, 35.13, -118.12, 1.4, "MIL_PATROL"),
+            ("t3", now - 19_000, now - 200, 34.09, -117.10, 36.11, -119.11, 2.8, "MIL_PATROL"),
+            ("t4", now - 18_500, now - 140, 33.11, -116.11, 35.12, -118.14, 2.3, "UNKNOWN"),
+            ("t5", now - 18_000, now - 160, 33.12, -116.10, 35.14, -118.11, 2.2, "UK_CARGO"),
+            ("t6", now - 17_500, now - 180, 33.10, -116.12, 37.11, -120.11, 5.6, "UNKNOWN"),
+            ("old1", now - 30_000, now - 25_000, 34.11, -117.11, 35.11, -118.11, 1.4, "US_CARGO"),
+            ("small1", now - 5_000, now - 100, 34.11, -117.11, 34.31, -117.11, 0.4, "US_CARGO"),
+        ]
+
+        for track in tracks:
+            self.insert_track(*track)
+
+        self.connection.commit()
+
+        output = io.StringIO()
+        with patch.object(query.time, "time", return_value=now):
+            with redirect_stdout(output):
+                query.detect_staging_and_projection(self.cursor)
+
+        lines = [line.strip() for line in output.getvalue().splitlines() if line.strip()]
+
+        self.assertIn("--- Staging Regions (Last 6 Hours) ---", lines)
+        self.assertIn("(34.1, -117.1, 3, 3)", lines)
+        self.assertIn("(33.1, -116.1, 3, 1)", lines)
+        self.assertIn("--- Projection Regions (Last 6 Hours) ---", lines)
+        self.assertIn("(35.1, -118.1, 4, 3)", lines)
+        self.assertIn("--- Major Flow Routes (Last 6 Hours) ---", lines)
+        self.assertIn("(34.1, -117.1, 35.1, -118.1, 2, 2, 7.0)", lines)
+        self.assertIn("(33.1, -116.1, 35.1, -118.1, 2, 1, 4.5)", lines)
+        self.assertNotIn("(34.1, -117.1, 34.3, -117.1, 1, 1, 3.5)", lines)
+
+
+class DetectActivityChangesTests(RecurringRegionsTests):
+    def test_detect_activity_changes_reports_surge_buildup_and_emerging_regions(self):
+        now = 400_000
+        rows = [
+            ("surge-p1", 34.11, -117.11, now - 4_000, "UNKNOWN", 3),
+            ("surge-p2", 34.21, -117.11, now - 3_800, "UNKNOWN", 3),
+            ("surge-r1", 34.11, -117.10, now - 1_000, "UNKNOWN", 3),
+            ("surge-r2", 34.12, -117.11, now - 900, "UNKNOWN", 3),
+            ("surge-r3", 34.21, -117.12, now - 800, "UNKNOWN", 4),
+            ("surge-r4", 34.22, -117.13, now - 700, "UNKNOWN", 4),
+            ("surge-r5", 34.31, -117.14, now - 600, "UNKNOWN", 3),
+            ("surge-r6", 34.32, -117.10, now - 500, "UNKNOWN", 4),
+            ("build-p1", 35.11, -118.11, now - 4_200, "UNKNOWN", 3),
+            ("build-p2", 35.12, -118.12, now - 4_000, "UNKNOWN", 3),
+            ("build-r1", 35.11, -118.10, now - 1_100, "US_CARGO", 5),
+            ("build-r2", 35.12, -118.11, now - 1_000, "MIL_PATROL", 5),
+            ("build-r3", 35.13, -118.12, now - 900, "UNKNOWN", 5),
+            ("build-r4", 35.14, -118.13, now - 800, "UNKNOWN", 5),
+            ("emerge-r1", 36.11, -119.11, now - 700, "US_CARGO", 4),
+            ("emerge-r2", 36.21, -119.12, now - 600, "UNKNOWN", 4),
+            ("emerge-r3", 36.22, -119.13, now - 500, "UNKNOWN", 4),
+            ("ignore-p1", 37.11, -120.11, now - 4_000, "UNKNOWN", 3),
+            ("ignore-r1", 37.11, -120.11, now - 600, "UNKNOWN", 3),
+            ("ignore-r2", 37.12, -120.12, now - 500, "UNKNOWN", 3),
+        ]
+
+        for row in rows:
+            self.insert_position(*row)
+
+        self.connection.commit()
+
+        output = io.StringIO()
+        with patch.object(query.time, "time", return_value=now):
+            with redirect_stdout(output):
+                query.detect_activity_changes(self.cursor)
+
+        lines = [line.strip() for line in output.getvalue().splitlines() if line.strip()]
+
+        self.assertEqual(lines[0], "--- Activity Changes (Last 90 Minutes) ---")
+        self.assertEqual(lines[1], "(36.2, -119.1, 11.5, 3, 1, 4.0, 'SURGE,EMERGING_REGION,ESCALATION')")
+        self.assertIn("(35.1, -118.1, 10.0, 2, 2, 2.0, 'MILITARY_BUILDUP,ESCALATION')", lines)
+        self.assertIn("(34.2, -117.1, 4.8, 4, 0, 0.5, 'SURGE')", lines)
+        self.assertEqual(sum(1 for line in lines if line.startswith("(34.")), 1)
+        self.assertNotIn("(37.1, -120.1, 1.0, 1, 0, 0.0, '')", lines)
+
+
 if __name__ == "__main__":
     unittest.main()
