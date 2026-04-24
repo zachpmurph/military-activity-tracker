@@ -1,0 +1,8 @@
+Summarize the key developments from this dataset.
+
+Focus on:
+- Major movement patterns
+- High-volume staging/projection
+- Cross-region flows
+
+Return 3–5 bullet points max.

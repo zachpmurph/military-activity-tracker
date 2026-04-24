@@ -1,0 +1,29 @@
+# Time windows
+WINDOW_SHORT = 30      # minutes
+WINDOW_MEDIUM = 120
+WINDOW_LONG = 360
+
+# Region merging
+MERGE_DISTANCE_LAT = 0.2
+MERGE_DISTANCE_LON = 0.2
+
+# Matching thresholds
+MATCH_DISTANCE = 0.3
+
+# Activity thresholds
+MIN_AIRCRAFT = 3
+MIN_DISTANCE_KM = 0.5
+
+# Scoring weights
+WEIGHT_AIRCRAFT = 1.0
+WEIGHT_MILITARY = 2.5
+
+# Change detection thresholds
+SURGE_THRESHOLD = 10
+MILITARY_BUILDUP_THRESHOLD = 3
+EMERGING_REGION_THRESHOLD = 5
+
+# Output limits
+MAX_ACTIVITY_ROWS = 50
+MAX_FLOW_ROUTES = 10
+MAX_REGIONS = 10

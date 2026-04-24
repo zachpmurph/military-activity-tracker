@@ -1,0 +1,13 @@
+Given detected activity:
+
+Determine if this is:
+- Likely real signal
+- Likely noise
+- Needs more data
+
+Base decision on:
+- Consistency
+- Volume
+- Military presence
+
+Return classification + 1-line reasoning.

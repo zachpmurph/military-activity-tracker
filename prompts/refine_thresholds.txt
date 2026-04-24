@@ -1,0 +1,8 @@
+Given current outputs and noise level:
+
+Suggest adjustments to:
+- Surge thresholds
+- Region merge distance
+- Scoring weights
+
+Be specific and minimal.

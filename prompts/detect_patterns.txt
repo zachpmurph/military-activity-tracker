@@ -1,0 +1,8 @@
+Analyze this data for patterns:
+
+Look for:
+- Repeated routes
+- Hub-and-spoke behavior
+- Sudden geographic expansion
+
+Return only meaningful patterns, ignore noise.
