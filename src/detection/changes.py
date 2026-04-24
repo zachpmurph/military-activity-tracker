@@ -1,3 +1,8 @@
+import time
+
+from geo.clustering import merge_regions
+
+
 def detect_activity_changes(cursor):
     print("\n--- Activity Changes (Last 90 Minutes) ---")
 
@@ -49,57 +54,6 @@ def detect_activity_changes(cursor):
                 "behaviors": set((behaviors or "").split(",")) - {""},
             })
         return snapshot
-
-    def merge_regions(snapshot):
-        merged_regions = []
-        visited = set()
-
-        for index, cluster in enumerate(snapshot):
-            if index in visited:
-                continue
-
-            pending = [index]
-            member_indices = []
-            visited.add(index)
-
-            while pending:
-                current_index = pending.pop()
-                member_indices.append(current_index)
-                current_cluster = snapshot[current_index]
-
-                for other_index, other_cluster in enumerate(snapshot):
-                    if other_index in visited:
-                        continue
-
-                    if (
-                        abs(current_cluster["lat_bin"] - other_cluster["lat_bin"]) <= 0.2
-                        and abs(current_cluster["lon_bin"] - other_cluster["lon_bin"]) <= 0.2
-                    ):
-                        visited.add(other_index)
-                        pending.append(other_index)
-
-            members = [snapshot[i] for i in member_indices]
-            total_aircraft = sum(member["aircraft_count"] for member in members)
-            total_military = sum(member["military_count"] for member in members)
-            total_score = sum(member["total_score"] for member in members)
-            behavior_union = set()
-
-            for member in members:
-                behavior_union.update(member["behaviors"])
-
-            center_lat = sum(member["lat_bin"] * member["aircraft_count"] for member in members) / total_aircraft
-            center_lon = sum(member["lon_bin"] * member["aircraft_count"] for member in members) / total_aircraft
-
-            merged_regions.append({
-                "lat": round(center_lat, 1),
-                "lon": round(center_lon, 1),
-                "aircraft_count": total_aircraft,
-                "military_count": total_military,
-                "avg_score": total_score / total_aircraft if total_aircraft else 0,
-                "distinct_behaviors": len(behavior_union),
-            })
-
-        return merged_regions
 
     recent_regions = merge_regions(fetch_snapshot(recent_cutoff))
     prior_regions = merge_regions(fetch_snapshot(prior_cutoff, recent_cutoff))

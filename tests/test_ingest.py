@@ -1,35 +1,63 @@
 import math
-import types
+import sqlite3
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-def load_ingest_module():
-    ingest_path = Path(__file__).resolve().parents[1] / "src" / "ingest.py"
-    source = ingest_path.read_text()
-    source = source.replace(
-        "from sources.adsb import fetch as fetch_adsb\n",
-        "def fetch_adsb():\n    return []\n",
-    )
-    source = source.replace(
-        "from sources.opensky import fetch as fetch_opensky\n",
-        "def fetch_opensky():\n    return []\n",
-    )
-    source = source.replace('sqlite3.connect("data/aircraft.db")', 'sqlite3.connect(":memory:")')
-    source = source.split("# --- MAIN LOOP ---")[0]
+import ingest.persistence as persistence
+import ingest.normalization as normalization
 
-    module = types.ModuleType("ingest_under_test")
-    exec(source, module.__dict__)
-    return module
+
+def setup_test_db():
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS aircraft_positions (
+            icao24 TEXT,
+            callsign TEXT,
+            lat REAL,
+            lon REAL,
+            altitude REAL,
+            speed REAL,
+            timestamp REAL,
+            type TEXT,
+            behavior TEXT,
+            score INTEGER
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS aircraft_tracks (
+            icao24 TEXT,
+            first_seen REAL,
+            last_seen REAL,
+            start_lat REAL,
+            start_lon REAL,
+            end_lat REAL,
+            end_lon REAL,
+            max_distance REAL,
+            PRIMARY KEY (icao24)
+        )
+    """)
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_time ON aircraft_positions (timestamp)")
+    conn.commit()
+    return conn, cursor
 
 
 class AircraftTracksTests(unittest.TestCase):
     def setUp(self):
-        self.ingest = load_ingest_module()
+        conn, cursor = setup_test_db()
+        persistence.conn = conn
+        persistence.cursor = cursor
+        normalization.history.clear()
 
     def tearDown(self):
-        self.ingest.conn.close()
+        persistence.conn.close()
 
     def make_aircraft(self, icao24, lat, lon):
         return {
@@ -43,16 +71,16 @@ class AircraftTracksTests(unittest.TestCase):
         }
 
     def test_store_aircraft_updates_persistent_tracks(self):
-        self.ingest.cursor.execute("""
+        persistence.cursor.execute("""
             INSERT INTO aircraft_tracks
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, ("stale1", 1, 2, 10.0, 10.0, 10.0, 10.0, 0.0))
-        self.ingest.conn.commit()
+        persistence.conn.commit()
 
-        with patch.object(self.ingest.time, "time", return_value=100_000):
-            self.ingest.store_aircraft([self.make_aircraft("abc123", 34.0, -117.0)])
+        with patch.object(persistence.time, "time", return_value=100_000):
+            persistence.store_aircraft([self.make_aircraft("abc123", 34.0, -117.0)])
 
-        row = self.ingest.cursor.execute("""
+        row = persistence.cursor.execute("""
             SELECT first_seen, last_seen, start_lat, start_lon, end_lat, end_lon, max_distance
             FROM aircraft_tracks
             WHERE icao24 = 'abc123'
@@ -60,10 +88,10 @@ class AircraftTracksTests(unittest.TestCase):
 
         self.assertEqual(row, (100_000, 100_000, 34.0, -117.0, 34.0, -117.0, 0.0))
 
-        with patch.object(self.ingest.time, "time", return_value=100_600):
-            self.ingest.store_aircraft([self.make_aircraft("abc123", 34.6, -116.2)])
+        with patch.object(persistence.time, "time", return_value=100_600):
+            persistence.store_aircraft([self.make_aircraft("abc123", 34.6, -116.2)])
 
-        updated_row = self.ingest.cursor.execute("""
+        updated_row = persistence.cursor.execute("""
             SELECT first_seen, last_seen, start_lat, start_lon, end_lat, end_lon, max_distance
             FROM aircraft_tracks
             WHERE icao24 = 'abc123'
@@ -72,7 +100,7 @@ class AircraftTracksTests(unittest.TestCase):
         self.assertEqual(updated_row[:6], (100_000, 100_600, 34.0, -117.0, 34.6, -116.2))
         self.assertAlmostEqual(updated_row[6], math.sqrt((0.6 ** 2) + (0.8 ** 2)))
 
-        stale_row = self.ingest.cursor.execute("""
+        stale_row = persistence.cursor.execute("""
             SELECT icao24
             FROM aircraft_tracks
             WHERE icao24 = 'stale1'

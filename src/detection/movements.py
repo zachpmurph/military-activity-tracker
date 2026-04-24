@@ -1,3 +1,6 @@
+import time
+
+
 def detect_movements(cursor):
     print("\n--- Cross-Region Movements (Last 2 Hours) ---")
 
