@@ -4,6 +4,7 @@ from detection.flows import detect_flow_routes
 
 
 def detect_staging_and_projection(cursor):
+    start = time.time()
     current_time = time.time()
     cutoff = current_time - 21600
 
@@ -55,3 +56,4 @@ def detect_staging_and_projection(cursor):
         print(row)
 
     detect_flow_routes(cursor, cutoff, type_expr)
+    print(f"[TIMER] detect_staging_and_projection: {time.time() - start:.3f}s")

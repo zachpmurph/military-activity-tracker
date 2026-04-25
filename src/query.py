@@ -12,10 +12,22 @@ from detection.changes import detect_activity_changes, detect_linked_regions
 from detection.movements import detect_movements
 from detection.staging import detect_staging_and_projection
 
+
+def timed(fn):
+    def wrapper(*args, **kwargs):
+        import time
+        start = time.time()
+        result = fn(*args, **kwargs)
+        duration = time.time() - start
+        print(f"[TIMER] {fn.__name__}: {duration:.3f}s")
+        return result
+    return wrapper
+
 # ----------------------------
 # Basic queries
 # ----------------------------
 
+@timed
 def most_suspicious(cursor):
     cutoff = time.time() - 21600
     cursor.execute("""
@@ -29,6 +41,7 @@ def most_suspicious(cursor):
     return cursor.fetchall()
 
 
+@timed
 def recent_activity(cursor):
     cutoff = time.time() - 600
 
@@ -44,6 +57,7 @@ def recent_activity(cursor):
     return cursor.fetchall()
 
 
+@timed
 def loitering(cursor):
     cutoff = time.time() - 21600
     cursor.execute("""
@@ -57,6 +71,7 @@ def loitering(cursor):
     return cursor.fetchall()
 
 
+@timed
 def persistent_aircraft(cursor):
     print("\n--- Persistent Aircraft (Last 30 Minutes) ---")
 
@@ -87,6 +102,7 @@ def persistent_aircraft(cursor):
         print(row)
 
 
+@timed
 def military_cluster(cursor):
     print("\n--- Military Activity Cluster (Last 30 Minutes) ---")
 
@@ -117,6 +133,7 @@ def military_cluster(cursor):
 # Region ranking (stays here so test patches on this module's globals work)
 # ----------------------------
 
+@timed
 def rank_regions(cursor):
     print("\n--- PRIORITY REGIONS ---")
 
@@ -190,6 +207,7 @@ def rank_regions(cursor):
 # Main
 # ----------------------------
 
+@timed
 def main():
     db_path = Path(__file__).resolve().parent / "data" / "aircraft.db"
     conn = sqlite3.connect(db_path)

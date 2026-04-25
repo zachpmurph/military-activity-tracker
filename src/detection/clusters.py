@@ -2,6 +2,7 @@ import time
 
 
 def recurring_regions(cursor):
+    start = time.time()
     print("\n--- Recurring Activity Regions (Last 6 Hours) ---")
 
     cutoff = time.time() - (6 * 3600)
@@ -38,6 +39,7 @@ def recurring_regions(cursor):
     rows = cursor.fetchall()
     for row in rows:
         print(row)
+    print(f"[TIMER] recurring_regions: {time.time() - start:.3f}s")
     return rows
 
 
@@ -121,6 +123,7 @@ def detect_spikes(cursor):
 
 
 def detect_new_entries(cursor):
+    start = time.time()
     print("\n--- New Aircraft Activity (Last 30 Minutes) ---")
 
     recent_cutoff = time.time() - 1800
@@ -176,5 +179,6 @@ def detect_new_entries(cursor):
 
     for row in cursor.fetchall():
         print(row)
+    print(f"[TIMER] detect_new_entries: {time.time() - start:.3f}s")
 
 

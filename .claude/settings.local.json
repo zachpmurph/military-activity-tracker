@@ -3,7 +3,11 @@
     "allow": [
       "Bash(python -m pytest tests/ -v)",
       "Bash(python -m unittest discover -s tests -v)",
-      "Bash(python -m unittest tests.test_query.EdgeCaseTests.test_threshold_boundary_inclusion_exclusion -v)"
+      "Bash(python -m unittest tests.test_query.EdgeCaseTests.test_threshold_boundary_inclusion_exclusion -v)",
+      "Bash(python -m unittest tests/test_query.py DetectMovementsTests -v)",
+      "Bash(python -m unittest discover -s tests)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(python -m pip install pytest -q)"
     ]
   }
 }

@@ -307,7 +307,8 @@ class DetectActivityChangesTests(RecurringRegionsTests):
             with redirect_stdout(output):
                 query.detect_activity_changes(self.cursor)
 
-        lines = [line.strip() for line in output.getvalue().splitlines() if line.strip()]
+        lines = [line.strip() for line in output.getvalue().splitlines()
+                 if line.strip() and not line.strip().startswith("[TIMER]")]
 
         self.assertEqual(lines[0], "--- Activity Changes (Last 90 Minutes) ---")
         # Emerging region ranks first: 6.0+12.5+5.0+3.0 military_bonus=26.5 > growth 25.7; both HIGH
