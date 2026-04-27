@@ -28,6 +28,7 @@ from intelligence.external_features import (
     ExternalSignal,
     SignalType,
     _PROXIMITY_RADIUS,
+    _signals_near_weighted,
     map_external_signals_to_features,
     merge_external_features,
 )
@@ -49,18 +50,25 @@ ENABLE_EXTERNAL_DEBUG: bool = False
 #
 # ANOMALY boost formula (applied when spike_set_by_external is True):
 #   boost = 1.0 + min(_EXT_BOOST_MAX, strength × _EXT_BOOST_PER_STRENGTH)
-#           [+ _EXT_BOOST_MULTI_TYPE  if ≥2 distinct SignalTypes present]
+#           [+ _EXT_BOOST_MULTI_TYPE      if ≥2 distinct SignalTypes present]
+#           [+ _EXT_CROSS_DOMAIN_BONUS    if both NO_FLY and MARITIME present]
 #
-# Example values:
-#   1 PROHIBITED signal  (strength=1.0) → 1.0 + 0.10        = 1.10
-#   2 PROHIBITED signals (strength=2.0) → 1.0 + 0.20        = 1.20
-#   2 signals, 2 types   (strength=2.0) → 1.0 + 0.20 + 0.05 = 1.25  (max)
-_EXT_STRENGTH_CAP:       float = 2.0   # max value of external_signal_strength field
-_EXT_BOOST_PER_STRENGTH: float = 0.10  # each unit of strength adds 10% to the boost
-_EXT_BOOST_MAX:          float = 0.25  # ceiling on the strength-derived boost component
-_EXT_BOOST_MULTI_TYPE:   float = 0.05  # extra boost when ≥2 distinct SignalTypes present
-_EXT_INFLUENCE_THRESHOLD: float = 5.0  # min |score delta| to mark external_influence=True
-_EXT_BYPASS_INTENSITY:   float = 0.75  # min signal intensity to waive min_aircraft guard
+# COORDINATED_ACTIVITY boost formula (applied when maritime_signal_strength > 0):
+#   coord_boost = 1.0 + min(_EXT_COORD_BOOST_MAX, maritime_strength × _EXT_BOOST_PER_STRENGTH)
+#                 [+ _EXT_CROSS_DOMAIN_BONUS    if both NO_FLY and MARITIME present]
+#
+# Example ANOMALY values:
+#   1 NO_FLY (strength=1.0)          → 1.0 + 0.10               = 1.10
+#   2 NO_FLY (strength=2.0)          → 1.0 + 0.20               = 1.20
+#   NO_FLY+MARITIME (strength=2.0)   → 1.0 + 0.20 + 0.05 + 0.05 = 1.30  (max)
+_EXT_STRENGTH_CAP:        float = 2.0   # max value of external_signal_strength field
+_EXT_BOOST_PER_STRENGTH:  float = 0.10  # each unit of strength adds 10% to the boost
+_EXT_BOOST_MAX:           float = 0.25  # ceiling on the strength-derived ANOMALY boost
+_EXT_BOOST_MULTI_TYPE:    float = 0.05  # extra boost when ≥2 distinct SignalTypes present
+_EXT_COORD_BOOST_MAX:     float = 0.20  # ceiling on the COORDINATED_ACTIVITY boost
+_EXT_CROSS_DOMAIN_BONUS:  float = 0.05  # additive bonus to both boosts when NO_FLY+MARITIME
+_EXT_INFLUENCE_THRESHOLD: float = 5.0   # min |score delta| to mark external_influence=True
+_EXT_BYPASS_INTENSITY:    float = 0.75  # min signal intensity to waive min_aircraft guard
 
 
 # ---------------------------------------------------------------------------
@@ -147,9 +155,13 @@ class RegionFeatures:
     spike_set_by_external: bool = field(default=False, compare=False)
 
     # Sum of intensities of nearby external signals, capped at _EXT_STRENGTH_CAP.
-    # Drives the dynamic boost formula in classify_regions when
+    # Drives the dynamic ANOMALY boost formula in classify_regions when
     # spike_set_by_external is True.
     external_signal_strength: float = field(default=0.0, compare=False)
+
+    # Sum of intensities of nearby MARITIME signals only, capped at _EXT_STRENGTH_CAP.
+    # Drives the COORDINATED_ACTIVITY boost formula in classify_regions.
+    maritime_signal_strength: float = field(default=0.0, compare=False)
 
     # Debug-only pre-merge snapshot: raw field values captured BEFORE the
     # external merge step.  Populated only when ENABLE_EXTERNAL_DEBUG=True.
@@ -468,21 +480,28 @@ def _explain(f: RegionFeatures, classification: Classification) -> str:
 # ---------------------------------------------------------------------------
 
 def _log_external_merge(
-    region:  RegionFeatures,
-    before:  Optional[Dict],
-    ext_map: Dict[str, float],
+    region:   RegionFeatures,
+    before:   Optional[Dict],
+    ext_map:  Dict[str, float],
+    nearby_w: Optional[List] = None,   # List[Tuple[ExternalSignal, float]]
 ) -> None:
     """
     Emit a log line showing what changed in *region* after the external merge.
 
     Parameters
     ──────────
-    region   Region after merge_external_features() was applied.
-    before   Snapshot dict of the five mutable fields BEFORE the merge.
-    ext_map  The normalised feature dict returned by map_external_signals_to_features.
+    region    Region after merge_external_features() was applied.
+    before    Snapshot dict of the five mutable fields BEFORE the merge.
+    ext_map   The normalised feature dict returned by map_external_signals_to_features.
+    nearby_w  Optional (signal, weight) pairs from _signals_near_weighted.
+              When provided, per-signal intensity/weight/effective detail is appended.
     """
-    region_id = f"({region.lat:.1f}, {region.lon:.1f})"
-    types_str = ", ".join(sorted(t.value for t in region.external_signal_types))
+    region_id    = f"({region.lat:.1f}, {region.lon:.1f})"
+    types_str    = ", ".join(sorted(t.value for t in region.external_signal_types))
+    cross_domain = (
+        SignalType.NO_FLY  in region.external_signal_types
+        and SignalType.MARITIME in region.external_signal_types
+    )
     changes: List[str] = []
     if before is not None:
         for fname in (
@@ -493,13 +512,26 @@ def _log_external_merge(
             new = getattr(region, fname)
             if old != new:
                 changes.append(f"{fname}: {old!r} -> {new!r}")
+
+    # Per-signal weight detail (only when caller supplies nearby_w).
+    signal_detail = ""
+    if nearby_w:
+        parts = [
+            f"{s.signal_type.value}(int={s.intensity:.2f} w={w:.2f} eff={s.intensity * w:.2f})"
+            for s, w in nearby_w
+        ]
+        signal_detail = f"  signals=[{', '.join(parts)}]"
+
     print(
         f"[EXT_DBG] merge  {region_id}  "
         f"n={region.external_signal_count}  "
         f"n_types={len(region.external_signal_types)}  "
         f"types=[{types_str}]  "
         f"max_intensity={region.external_signal_max_intensity:.2f}  "
-        f"strength={region.external_signal_strength:.2f}"
+        f"strength={region.external_signal_strength:.2f}  "
+        f"maritime_strength={region.maritime_signal_strength:.2f}  "
+        f"cross_domain={cross_domain}"
+        + signal_detail
         + (f"  delta={changes}" if changes else "  (no field changes)")
     )
 
@@ -522,6 +554,10 @@ def _log_classify_impact(
     """
     region_id          = f"({f.lat:.1f}, {f.lon:.1f})"
     types_str          = ", ".join(sorted(t.value for t in f.external_signal_types))
+    cross_domain       = (
+        SignalType.NO_FLY  in f.external_signal_types
+        and SignalType.MARITIME in f.external_signal_types
+    )
     winner_delta       = scores[winner] - baseline_scores.get(winner, 0.0)
     base_winner        = max(baseline_scores, key=baseline_scores.__getitem__)
     external_influence = (
@@ -536,6 +572,8 @@ def _log_classify_impact(
         f"n_types={len(f.external_signal_types)}  "
         f"types=[{types_str}]  "
         f"strength={f.external_signal_strength:.2f}  "
+        f"maritime_strength={f.maritime_signal_strength:.2f}  "
+        f"cross_domain={cross_domain}  "
         f"winner={winner.value}  "
         f"score={scores[winner]:.1f}  "
         f"baseline={baseline_scores.get(winner, 0.0):.1f}  "
@@ -705,22 +743,26 @@ def build_features(
             ext_map = map_external_signals_to_features(external_signals, region)
             merge_external_features(region, ext_map)
 
-            # Observability: record proximity count, types, and max intensity.
-            # Uses the same radius as map_external_signals_to_features so the
-            # tracking is always consistent with what was actually applied.
-            nearby = [
-                s for s in external_signals
-                if abs(s.lat - region.lat) <= _PROXIMITY_RADIUS
-                and abs(s.lon - region.lon) <= _PROXIMITY_RADIUS
-            ]
-            if nearby:
-                region.external_signal_count         = len(nearby)
-                region.external_signal_types         = {s.signal_type for s in nearby}
-                region.external_signal_max_intensity = max(
-                    s.intensity for s in nearby
-                )
+            # Observability: record proximity count, types, and weighted strengths.
+            # Uses the same _signals_near_weighted call as map_external_signals_to_features
+            # so tracking is always consistent with what was actually applied.
+            # Strength fields use effective (weighted) intensities so they match what
+            # the boost formulas in classify_regions actually see.
+            # external_signal_max_intensity keeps raw intensity — it drives the
+            # bypass quality check (_EXT_BYPASS_INTENSITY), not a spatial influence check.
+            nearby_w = _signals_near_weighted(external_signals, region.lat, region.lon)
+            if nearby_w:
+                region.external_signal_count         = len(nearby_w)
+                region.external_signal_types         = {s.signal_type for s, _ in nearby_w}
+                region.external_signal_max_intensity = max(s.intensity for s, _ in nearby_w)
                 region.external_signal_strength      = min(
-                    _EXT_STRENGTH_CAP, sum(s.intensity for s in nearby)
+                    _EXT_STRENGTH_CAP,
+                    sum(s.intensity * w for s, w in nearby_w),
+                )
+                region.maritime_signal_strength      = min(
+                    _EXT_STRENGTH_CAP,
+                    sum(s.intensity * w for s, w in nearby_w
+                        if s.signal_type == SignalType.MARITIME),
                 )
                 # Goal 2 gating: did the external merge flip spike_flag on?
                 # Only True when detection layer had NOT already set it.
@@ -728,7 +770,9 @@ def build_features(
                     region.spike_set_by_external = True
 
             if ENABLE_EXTERNAL_DEBUG and ext_map:
-                _log_external_merge(region, region._pre_external_snapshot, ext_map)
+                _log_external_merge(
+                    region, region._pre_external_snapshot, ext_map, nearby_w or None
+                )
 
     return list(regions.values())
 
@@ -771,20 +815,42 @@ def classify_regions(
 
         scores = _score_region(f, context)
 
-        # Goal 2: ANOMALY score boost when spike_flag was set exclusively by
-        # an external signal (pre-existing detection-layer spikes are not boosted).
-        # Boost is dynamic: proportional to signal strength, capped at 25%, with
-        # an extra 5% when ≥2 distinct SignalTypes reinforce the same region.
-        # Applied post-scoring so profile weights stay unchanged and no other
-        # class score is touched.  Cap at 100 to preserve [0, 100].
+        # Cross-domain flag: both air (NO_FLY) and naval (MARITIME) signals are
+        # present near this region.  Adds _EXT_CROSS_DOMAIN_BONUS to the boost
+        # factor for both ANOMALY and COORDINATED_ACTIVITY.
+        cross_domain = (
+            SignalType.NO_FLY  in f.external_signal_types
+            and SignalType.MARITIME in f.external_signal_types
+        )
+
+        # ANOMALY boost: externally-set spike, dynamic by signal strength.
+        # Proportional to total strength (max 25%), +5% for ≥2 distinct types,
+        # +5% cross-domain bonus when both NO_FLY and MARITIME are present.
+        # Only applied when the detection layer did not already set spike_flag;
+        # cap at 100 to preserve [0, 100].
         if f.spike_set_by_external:
             boost = 1.0 + min(
                 _EXT_BOOST_MAX, f.external_signal_strength * _EXT_BOOST_PER_STRENGTH
             )
             if len(f.external_signal_types) >= 2:
                 boost += _EXT_BOOST_MULTI_TYPE
+            if cross_domain:
+                boost += _EXT_CROSS_DOMAIN_BONUS
             scores[Classification.ANOMALY] = min(
                 100.0, scores[Classification.ANOMALY] * boost
+            )
+
+        # COORDINATED_ACTIVITY boost: maritime signal present.
+        # Proportional to MARITIME-only strength (max 20%), +5% cross-domain bonus.
+        if f.maritime_signal_strength > 0:
+            coord_boost = 1.0 + min(
+                _EXT_COORD_BOOST_MAX,
+                f.maritime_signal_strength * _EXT_BOOST_PER_STRENGTH,
+            )
+            if cross_domain:
+                coord_boost += _EXT_CROSS_DOMAIN_BONUS
+            scores[Classification.COORDINATED_ACTIVITY] = min(
+                100.0, scores[Classification.COORDINATED_ACTIVITY] * coord_boost
             )
 
         winner = max(scores, key=scores.__getitem__)

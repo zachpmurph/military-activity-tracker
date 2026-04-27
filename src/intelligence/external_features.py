@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, TYPE_CHECKING
+from typing import Dict, List, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:                                    # pragma: no cover
     from intelligence.classifier import RegionFeatures
@@ -43,8 +43,11 @@ if TYPE_CHECKING:                                    # pragma: no cover
 # ---------------------------------------------------------------------------
 
 # Spatial proximity window for associating a signal to a grid cell.
-# 0.5° ≈ 55 km; grid cells are rounded to 0.1° in build_features.
-_PROXIMITY_RADIUS: float = 0.5
+# 1.5° ≈ 165 km; grid cells are rounded to 0.1° in build_features.
+# Influence decays linearly from 1.0 at the centre to 0.0 at the edge
+# (see _signals_near_weighted), so enlarging the radius allows gradual
+# influence rather than all-or-nothing coverage.
+_PROXIMITY_RADIUS: float = 1.5
 
 # Conversion factors: normalised feature-vector value → raw RegionFeatures
 # field units.  These invert the normalisation applied in
@@ -115,6 +118,46 @@ def _signals_near(
     ]
 
 
+def _signals_near_weighted(
+    signals:    List[ExternalSignal],
+    region_lat: float,
+    region_lon: float,
+    radius:     float = _PROXIMITY_RADIUS,
+) -> List[Tuple[ExternalSignal, float]]:
+    """
+    Return ``(signal, weight)`` pairs for every signal within *radius* degrees.
+
+    Distance metric
+    ───────────────
+    Chebyshev distance (max of absolute lat/lon deltas), consistent with the
+    original binary _signals_near logic.
+
+    Weight function
+    ───────────────
+    Linear decay from 1.0 at the grid-cell centre to 0.0 at the boundary::
+
+        weight = 1.0 − (distance / radius)
+
+    A signal exactly on top of the region contributes with full intensity;
+    one right at the boundary contributes almost nothing (weight ≈ 0).
+    Signals outside the radius are excluded entirely.
+
+    Usage
+    ─────
+    Callers compute *effective intensity* as ``signal.intensity × weight``
+    before feeding values into feature mappings.
+    """
+    result: List[Tuple[ExternalSignal, float]] = []
+    for s in signals:
+        lat_diff = abs(s.lat - region_lat)
+        lon_diff = abs(s.lon - region_lon)
+        distance = max(lat_diff, lon_diff)
+        if distance <= radius:
+            weight = 1.0 - (distance / radius)
+            result.append((s, weight))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -133,19 +176,20 @@ def map_external_signals_to_features(
 
     Aggregation strategy
     ────────────────────
-    *Per signal type*: the maximum intensity of nearby signals of that type.
+    *Per signal type*: the maximum effective_intensity of nearby signals of
+    that type, where effective_intensity = signal.intensity × distance_weight.
     *Per output feature*: the maximum contribution across all signal types.
-    This means the most salient signal always wins; no averaging hides a
-    high-intensity reading behind a cluster of quiet ones.
+    This means the most salient nearby signal always wins; no averaging hides
+    a high-effective-intensity reading behind weaker neighbours.
 
-    Mapping table
+    Mapping table  (iv = max effective_intensity for that type)
     ─────────────
-    NO_FLY    → spike_flag = intensity
-                change_score_norm = intensity × 0.80
-    MARITIME  → coordination_flag = intensity
-                inflow_norm = intensity × 0.60
-    SATELLITE → change_score_norm = intensity × 0.70
-                novelty = intensity × 0.50
+    NO_FLY    → spike_flag = iv
+                change_score_norm = iv × 0.80
+    MARITIME  → coordination_flag = iv
+                inflow_norm = iv × 0.80
+    SATELLITE → change_score_norm = iv × 0.70
+                novelty = iv × 0.50
 
     Parameters
     ──────────
@@ -156,16 +200,18 @@ def map_external_signals_to_features(
     ───────
     ``Dict[str, float]`` — feature name → value in [0, 1].
     """
-    nearby = _signals_near(signals, region.lat, region.lon)
-    if not nearby:
+    nearby_w = _signals_near_weighted(signals, region.lat, region.lon)
+    if not nearby_w:
         return {}
 
-    # Reduce to max intensity per signal type among nearby signals
+    # Reduce to max effective_intensity per signal type.
+    # effective_intensity = raw_intensity × distance_weight, so signals at the
+    # grid-cell centre contribute fully while those near the boundary barely
+    # register.  All values are clamped to [0, 1] before use.
     by_type: Dict[str, float] = {}
-    for s in nearby:
-        by_type[s.signal_type.value] = max(
-            by_type.get(s.signal_type.value, 0.0), s.intensity
-        )
+    for s, weight in nearby_w:
+        eff = _clamp(s.intensity * weight)
+        by_type[s.signal_type.value] = max(by_type.get(s.signal_type.value, 0.0), eff)
 
     out: Dict[str, float] = {}
 
@@ -179,7 +225,7 @@ def map_external_signals_to_features(
     if SignalType.MARITIME.value in by_type:
         iv = by_type[SignalType.MARITIME.value]
         out["coordination_flag"] = max(out.get("coordination_flag", 0.0), _clamp(iv))
-        out["inflow_norm"]       = max(out.get("inflow_norm",       0.0), _clamp(iv * 0.60))
+        out["inflow_norm"]       = max(out.get("inflow_norm",       0.0), _clamp(iv * 0.80))
 
     # SATELLITE: overhead observation → change evidence + novelty
     if SignalType.SATELLITE.value in by_type:
