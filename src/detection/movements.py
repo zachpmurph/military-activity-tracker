@@ -14,7 +14,7 @@ def detect_movements(cursor):
     # Here we do one O(n) Python pass to extract first/last position per
     # aircraft, then one O(aircraft) pass to aggregate routes.
     cursor.execute("""
-        SELECT icao24, ROUND(lat, 1), ROUND(lon, 1), timestamp, type
+        SELECT icao24, lat_bin, lon_bin, timestamp, type
         FROM aircraft_positions
         WHERE timestamp BETWEEN ? AND ?
     """, (start_time, end_time))
@@ -89,3 +89,4 @@ def detect_movements(cursor):
     for row in results[:10]:
         print(row)
     print(f"[TIMER] detect_movements: {time.time() - start:.3f}s")
+    return results[:10]

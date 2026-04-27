@@ -27,5 +27,5 @@ def detect_flow_routes(cursor, cutoff, type_expr):
         LIMIT 10;
     """, (cutoff,))
 
-    for row in cursor.fetchall():
+    for row in cursor:
         print(row)

@@ -11,6 +11,7 @@ from detection.clusters import (
 from detection.changes import detect_activity_changes, detect_linked_regions
 from detection.movements import detect_movements
 from detection.staging import detect_staging_and_projection
+from intelligence.classifier import build_features, classify_regions
 
 
 def timed(fn):
@@ -98,7 +99,7 @@ def persistent_aircraft(cursor):
         LIMIT 10;
     """, (cutoff,))
 
-    for row in cursor.fetchall():
+    for row in cursor:
         print(row)
 
 
@@ -207,10 +208,36 @@ def rank_regions(cursor):
 # Main
 # ----------------------------
 
+def _migrate(conn):
+    """Ensure lat_bin / lon_bin columns and the composite index exist.
+
+    Safe to call on every startup: ADD COLUMN is no-op if the column already
+    exists (caught), and CREATE INDEX IF NOT EXISTS is always idempotent.
+    """
+    cur = conn.cursor()
+    for col in ("lat_bin", "lon_bin"):
+        try:
+            cur.execute(f"ALTER TABLE aircraft_positions ADD COLUMN {col} REAL")
+        except sqlite3.OperationalError:
+            pass  # column already present
+    cur.execute("""
+        UPDATE aircraft_positions
+        SET lat_bin = ROUND(lat, 1),
+            lon_bin = ROUND(lon, 1)
+        WHERE lat_bin IS NULL
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_time_bins
+        ON aircraft_positions (timestamp, lat_bin, lon_bin)
+    """)
+    conn.commit()
+
+
 @timed
 def main():
     db_path = Path(__file__).resolve().parent / "data" / "aircraft.db"
     conn = sqlite3.connect(db_path)
+    _migrate(conn)
     cursor = conn.cursor()
 
     cursor.execute("SELECT timestamp FROM aircraft_positions ORDER BY timestamp DESC LIMIT 5;")
@@ -231,13 +258,34 @@ def main():
 
     persistent_aircraft(cursor)
     military_cluster(cursor)
-    recurring_regions(cursor)
+
+    # Collect detection outputs for the intelligence layer
+    _recurring   = recurring_regions(cursor)
     rank_regions(cursor)
-    detect_new_entries(cursor)
-    detect_movements(cursor)
-    detect_staging_and_projection(cursor)
-    detect_activity_changes(cursor)
+    _new_entries = detect_new_entries(cursor)
+    _movements   = detect_movements(cursor)
+    _staging, _projection = detect_staging_and_projection(cursor)
+    _coordinated = coordinated_activity(cursor)
+    _spikes      = detect_spikes(cursor)
+    _changes     = detect_activity_changes(cursor) or []
     detect_linked_regions(cursor)
+
+    # Intelligence classification
+    features = build_features(
+        coordinated      = _coordinated,
+        spikes           = _spikes,
+        recurring        = _recurring,
+        new_entries      = _new_entries,
+        movements        = _movements,
+        staging          = _staging,
+        projection       = _projection,
+        activity_changes = _changes,
+    )
+    intelligence = classify_regions(features)
+
+    print("\n--- INTELLIGENCE ASSESSMENT ---")
+    for region in intelligence[:10]:
+        print(region)
 
     conn.close()
 

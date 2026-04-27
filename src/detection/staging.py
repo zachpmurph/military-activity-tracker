@@ -31,8 +31,10 @@ def detect_staging_and_projection(cursor):
         LIMIT 10;
     """, (cutoff,))
 
-    for row in cursor.fetchall():
+    staging_rows = []
+    for row in cursor:
         print(row)
+        staging_rows.append(row)
 
     print("\n--- Projection Regions (Last 6 Hours) ---")
     cursor.execute(f"""
@@ -52,8 +54,11 @@ def detect_staging_and_projection(cursor):
         LIMIT 10;
     """, (cutoff,))
 
-    for row in cursor.fetchall():
+    projection_rows = []
+    for row in cursor:
         print(row)
+        projection_rows.append(row)
 
     detect_flow_routes(cursor, cutoff, type_expr)
     print(f"[TIMER] detect_staging_and_projection: {time.time() - start:.3f}s")
+    return staging_rows, projection_rows

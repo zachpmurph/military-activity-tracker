@@ -26,7 +26,9 @@ def setup_test_db():
             timestamp REAL,
             type TEXT,
             behavior TEXT,
-            score INTEGER
+            score INTEGER,
+            lat_bin REAL,
+            lon_bin REAL
         )
     """)
 

@@ -66,7 +66,7 @@ def store_aircraft(aircraft_list):
 
         cursor.execute("""
         INSERT INTO aircraft_positions
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             a["icao24"],
             a["callsign"],
@@ -77,7 +77,9 @@ def store_aircraft(aircraft_list):
             now,
             classification,
             behavior,
-            score
+            score,
+            round(a["lat"], 1),
+            round(a["lon"], 1),
         ))
 
     cleanup_old_tracks(now)

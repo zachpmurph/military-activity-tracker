@@ -16,7 +16,9 @@ def init_db(path="data/aircraft.db"):
             timestamp REAL,
             type TEXT,
             behavior TEXT,
-            score INTEGER
+            score INTEGER,
+            lat_bin REAL,
+            lon_bin REAL
         )
     """)
 
@@ -34,7 +36,27 @@ def init_db(path="data/aircraft.db"):
         )
     """)
 
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_time ON aircraft_positions (timestamp)")
+    # Migrate existing databases: add lat_bin / lon_bin columns if absent,
+    # then backfill any rows written before the migration.
+    for col in ("lat_bin", "lon_bin"):
+        try:
+            cursor.execute(f"ALTER TABLE aircraft_positions ADD COLUMN {col} REAL")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+    cursor.execute("""
+        UPDATE aircraft_positions
+        SET lat_bin = ROUND(lat, 1),
+            lon_bin = ROUND(lon, 1)
+        WHERE lat_bin IS NULL
+    """)
+
+    # Composite index covers every query that filters on timestamp and groups
+    # by (lat_bin, lon_bin).  Replaces the narrower idx_time(timestamp) index.
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_time_bins
+        ON aircraft_positions (timestamp, lat_bin, lon_bin)
+    """)
     conn.commit()
 
     return conn, cursor

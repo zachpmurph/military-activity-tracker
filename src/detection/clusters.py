@@ -10,8 +10,8 @@ def recurring_regions(cursor):
     cursor.execute("""
         WITH bucket_clusters AS (
             SELECT
-                ROUND(lat, 1) AS lat_bin,
-                ROUND(lon, 1) AS lon_bin,
+                lat_bin,
+                lon_bin,
                 CAST(timestamp / 1800 AS INTEGER) AS bucket,
                 COUNT(DISTINCT icao24) AS aircraft_count,
                 COUNT(DISTINCT CASE
@@ -50,8 +50,8 @@ def coordinated_activity(cursor):
 
     cursor.execute("""
         SELECT
-            ROUND(lat, 1) AS lat_bin,
-            ROUND(lon, 1) AS lon_bin,
+            lat_bin,
+            lon_bin,
             COUNT(DISTINCT icao24) AS aircraft_count,
             COUNT(DISTINCT CASE
                 WHEN type IN ('US_CARGO', 'UK_CARGO', 'TANKER') THEN icao24
@@ -80,8 +80,8 @@ def detect_spikes(cursor):
     cursor.execute("""
         WITH current_window AS (
             SELECT
-                ROUND(lat, 1) AS lat_bin,
-                ROUND(lon, 1) AS lon_bin,
+                lat_bin,
+                lon_bin,
                 COUNT(DISTINCT icao24) AS aircraft_count,
                 COUNT(DISTINCT CASE
                     WHEN type IN ('US_CARGO', 'UK_CARGO', 'TANKER') THEN icao24
@@ -92,8 +92,8 @@ def detect_spikes(cursor):
         ),
         previous_window AS (
             SELECT
-                ROUND(lat, 1) AS lat_bin,
-                ROUND(lon, 1) AS lon_bin,
+                lat_bin,
+                lon_bin,
                 COUNT(DISTINCT icao24) AS aircraft_count
             FROM aircraft_positions
             WHERE timestamp > ? AND timestamp <= ?
@@ -134,8 +134,8 @@ def detect_new_entries(cursor):
         WITH recent_presence AS (
             SELECT
                 icao24,
-                ROUND(lat, 1) AS lat_bin,
-                ROUND(lon, 1) AS lon_bin,
+                lat_bin,
+                lon_bin,
                 MAX(type) AS type
             FROM aircraft_positions
             WHERE timestamp >= ?
@@ -144,8 +144,8 @@ def detect_new_entries(cursor):
         baseline_presence AS (
             SELECT
                 icao24,
-                ROUND(lat, 1) AS lat_bin,
-                ROUND(lon, 1) AS lon_bin
+                lat_bin,
+                lon_bin
             FROM aircraft_positions
             WHERE timestamp BETWEEN ? AND ?
             GROUP BY icao24, lat_bin, lon_bin
@@ -177,8 +177,11 @@ def detect_new_entries(cursor):
         LIMIT 10;
     """, (recent_cutoff, baseline_start, baseline_end))
 
-    for row in cursor.fetchall():
+    rows = []
+    for row in cursor:
         print(row)
+        rows.append(row)
     print(f"[TIMER] detect_new_entries: {time.time() - start:.3f}s")
+    return rows
 
 

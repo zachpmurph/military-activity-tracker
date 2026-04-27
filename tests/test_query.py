@@ -28,7 +28,9 @@ class RecurringRegionsTests(unittest.TestCase):
                 timestamp REAL,
                 type TEXT,
                 behavior TEXT,
-                score INTEGER
+                score INTEGER,
+                lat_bin REAL,
+                lon_bin REAL
             )
         """)
 
@@ -38,7 +40,7 @@ class RecurringRegionsTests(unittest.TestCase):
     def insert_position(self, icao24, lat, lon, timestamp, aircraft_type, score):
         self.cursor.execute("""
             INSERT INTO aircraft_positions
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             icao24,
             icao24,
@@ -50,6 +52,8 @@ class RecurringRegionsTests(unittest.TestCase):
             aircraft_type,
             "NORMAL",
             score,
+            round(lat, 1),
+            round(lon, 1),
         ))
 
     def test_recurring_regions_prints_top_recurring_cluster(self):

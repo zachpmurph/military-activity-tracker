@@ -47,8 +47,8 @@ def detect_activity_changes(cursor, include_breakdown=False):
         if end_time is None:
             cursor.execute("""
                 SELECT
-                    ROUND(lat, 1),
-                    ROUND(lon, 1),
+                    lat_bin,
+                    lon_bin,
                     COUNT(DISTINCT icao24),
                     COUNT(DISTINCT CASE
                         WHEN type LIKE '%CARGO%' OR type LIKE '%MIL%' THEN icao24
@@ -57,13 +57,13 @@ def detect_activity_changes(cursor, include_breakdown=False):
                     GROUP_CONCAT(DISTINCT behavior)
                 FROM aircraft_positions
                 WHERE timestamp >= ?
-                GROUP BY 1,2
+                GROUP BY lat_bin, lon_bin
             """, (start_time,))
         else:
             cursor.execute("""
                 SELECT
-                    ROUND(lat, 1),
-                    ROUND(lon, 1),
+                    lat_bin,
+                    lon_bin,
                     COUNT(DISTINCT icao24),
                     COUNT(DISTINCT CASE
                         WHEN type LIKE '%CARGO%' OR type LIKE '%MIL%' THEN icao24
@@ -72,9 +72,11 @@ def detect_activity_changes(cursor, include_breakdown=False):
                     GROUP_CONCAT(DISTINCT behavior)
                 FROM aircraft_positions
                 WHERE timestamp >= ? AND timestamp < ?
-                GROUP BY 1,2
+                GROUP BY lat_bin, lon_bin
             """, (start_time, end_time))
 
+        # Stream rows directly from the cursor — avoids materialising the full
+        # result set into a list before building the snapshot dicts.
         return [
             {
                 "lat_bin": lat,
@@ -84,7 +86,7 @@ def detect_activity_changes(cursor, include_breakdown=False):
                 "total_score": ts or 0,
                 "behaviors": set((beh or "").split(",")) - {""},
             }
-            for lat, lon, ac, mc, ts, beh in cursor.fetchall()
+            for lat, lon, ac, mc, ts, beh in cursor
         ]
 
     cursor.execute("""
@@ -125,7 +127,7 @@ def detect_activity_changes(cursor, include_breakdown=False):
 
     t0 = time.time()
     cursor.execute("SELECT region_id, first_seen, last_seen FROM region_activity")
-    activity_cache = {rid: fs for rid, fs, _ls in cursor.fetchall()}
+    activity_cache = {rid: fs for rid, fs, _ls in cursor}
     print(f"[TIMER] db_cache_read: {time.time() - t0:.3f}s")
 
     results        = []
@@ -311,6 +313,7 @@ def detect_activity_changes(cursor, include_breakdown=False):
     cursor.connection.commit()
     print(f"[TIMER] sort_and_print: {time.time() - t0:.3f}s")
     print(f"[TIMER] detect_activity_changes: {time.time() - start:.3f}s")
+    return sorted_results
 
 def detect_linked_regions(cursor):
     start = time.time()
