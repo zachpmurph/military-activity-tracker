@@ -12,6 +12,17 @@ from detection.changes import detect_activity_changes, detect_linked_regions
 from detection.movements import detect_movements
 from detection.staging import detect_staging_and_projection
 from intelligence.classifier import build_features, classify_regions
+from intelligence.notam_ingestion import fetch_notam_signals
+
+
+# ---------------------------------------------------------------------------
+# Feature toggles
+# ---------------------------------------------------------------------------
+# Set ENABLE_EXTERNAL_SIGNALS = False to skip all external signal fetching
+# (useful for A/B comparisons, profiling, or when a data source is suspect).
+# When False, build_features receives no external_signals and behaves exactly
+# as it did before the NOTAM pipeline was added.
+ENABLE_EXTERNAL_SIGNALS: bool = True
 
 
 def timed(fn):
@@ -205,6 +216,56 @@ def rank_regions(cursor):
         print(row)
 
 # ----------------------------
+# External signal summary
+# ----------------------------
+
+def _compute_external_summary(signals, features):
+    """
+    Return a dict of summary statistics for external signal influence.
+
+    Pure function (no I/O) — suitable for unit testing.
+
+    Keys
+    ────
+    total_signals_processed   int     – total ExternalSignal objects consumed
+    regions_affected          int     – regions where external_signal_count > 0
+    pct_regions_affected      float   – percentage (0–100, 1 d.p.)
+    average_intensity         float   – mean signal intensity (0.0 when no signals)
+    count_by_type             dict    – signal_type.value → count
+    """
+    total      = len(signals)
+    affected   = sum(1 for f in features if f.external_signal_count > 0)
+    n_regions  = max(len(features), 1)
+    pct        = round((affected / n_regions) * 100, 1)
+    avg_intens = round(sum(s.intensity for s in signals) / total, 3) if total else 0.0
+
+    by_type: dict = {}
+    for s in signals:
+        key = s.signal_type.value
+        by_type[key] = by_type.get(key, 0) + 1
+
+    return {
+        "total_signals_processed": total,
+        "regions_affected":        affected,
+        "pct_regions_affected":    pct,
+        "average_intensity":       avg_intens,
+        "count_by_type":           by_type,
+    }
+
+
+def _print_external_summary(summary):
+    """Format and print the summary dict produced by _compute_external_summary."""
+    print("\n--- EXTERNAL SIGNAL SUMMARY ---")
+    print(f"  total_signals_processed : {summary['total_signals_processed']}")
+    print(f"  regions_affected        : {summary['regions_affected']}")
+    print(f"  % of regions affected   : {summary['pct_regions_affected']:.1f}%")
+    print(f"  average_intensity       : {summary['average_intensity']:.3f}")
+    print(f"  count by type           :")
+    for stype, count in sorted(summary["count_by_type"].items()):
+        print(f"    {stype:<12s}: {count}")
+
+
+# ----------------------------
 # Main
 # ----------------------------
 
@@ -270,6 +331,11 @@ def main():
     _changes     = detect_activity_changes(cursor) or []
     detect_linked_regions(cursor)
 
+    # External signals (NOTAM / no-fly zones).
+    # Skipped entirely when ENABLE_EXTERNAL_SIGNALS is False so the pipeline
+    # behaves identically to pre-NOTAM behaviour — useful for A/B comparisons.
+    _notam_signals = fetch_notam_signals() if ENABLE_EXTERNAL_SIGNALS else []
+
     # Intelligence classification
     features = build_features(
         coordinated      = _coordinated,
@@ -280,12 +346,16 @@ def main():
         staging          = _staging,
         projection       = _projection,
         activity_changes = _changes,
+        external_signals = _notam_signals if _notam_signals else None,
     )
     intelligence = classify_regions(features)
 
     print("\n--- INTELLIGENCE ASSESSMENT ---")
     for region in intelligence[:10]:
         print(region)
+
+    # External signal influence summary
+    _print_external_summary(_compute_external_summary(_notam_signals, features))
 
     conn.close()
 

@@ -52,8 +52,10 @@ from intelligence.external_features import (
 # ---------------------------------------------------------------------------
 
 def _region(lat: float = 0.0, lon: float = 0.0, **kwargs) -> RegionFeatures:
-    """Construct a RegionFeatures with known defaults."""
-    return RegionFeatures(lat=lat, lon=lon, aircraft_count=10, **kwargs)
+    """Construct a RegionFeatures with known defaults (overridable via kwargs)."""
+    defaults = {"aircraft_count": 10}
+    defaults.update(kwargs)
+    return RegionFeatures(lat=lat, lon=lon, **defaults)
 
 
 def _signal(

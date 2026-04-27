@@ -18,16 +18,49 @@ matching the return types already emitted by the detection functions.
 
 from __future__ import annotations
 
+import copy
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from intelligence.external_features import (
     ExternalSignal,
+    SignalType,
+    _PROXIMITY_RADIUS,
     map_external_signals_to_features,
     merge_external_features,
 )
+
+
+# ---------------------------------------------------------------------------
+# DEBUG TOGGLE
+# ---------------------------------------------------------------------------
+# Set ENABLE_EXTERNAL_DEBUG = True during development to emit per-region
+# log lines showing exactly how external signals (NOTAM etc.) influenced
+# the feature vector and classification scores.
+# Has ZERO effect on any computed value — only controls print() calls.
+# ---------------------------------------------------------------------------
+
+ENABLE_EXTERNAL_DEBUG: bool = False
+
+# Scoring constants for external signal influence
+# (no effect when external_signals is None/empty).
+#
+# ANOMALY boost formula (applied when spike_set_by_external is True):
+#   boost = 1.0 + min(_EXT_BOOST_MAX, strength × _EXT_BOOST_PER_STRENGTH)
+#           [+ _EXT_BOOST_MULTI_TYPE  if ≥2 distinct SignalTypes present]
+#
+# Example values:
+#   1 PROHIBITED signal  (strength=1.0) → 1.0 + 0.10        = 1.10
+#   2 PROHIBITED signals (strength=2.0) → 1.0 + 0.20        = 1.20
+#   2 signals, 2 types   (strength=2.0) → 1.0 + 0.20 + 0.05 = 1.25  (max)
+_EXT_STRENGTH_CAP:       float = 2.0   # max value of external_signal_strength field
+_EXT_BOOST_PER_STRENGTH: float = 0.10  # each unit of strength adds 10% to the boost
+_EXT_BOOST_MAX:          float = 0.25  # ceiling on the strength-derived boost component
+_EXT_BOOST_MULTI_TYPE:   float = 0.05  # extra boost when ≥2 distinct SignalTypes present
+_EXT_INFLUENCE_THRESHOLD: float = 5.0  # min |score delta| to mark external_influence=True
+_EXT_BYPASS_INTENSITY:   float = 0.75  # min signal intensity to waive min_aircraft guard
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +127,36 @@ class RegionFeatures:
     # --- Activity change signal ---
     change_score:         float = 0.0
     change_level:         str   = ""    # HIGH | MEDIUM | LOW
+
+    # ------------------------------------------------------------------
+    # External signal observability  (populated by build_features)
+    # ------------------------------------------------------------------
+    # These three fields record which external signals (NOTAM / maritime /
+    # satellite) were spatially near this region when build_features() ran.
+    # They default to "no signal" so code that never passes external_signals
+    # never touches them.  Excluded from equality comparison so they don't
+    # break existing tests that compare RegionFeatures objects.
+    external_signal_count:         int             = field(default=0,           compare=False)
+    external_signal_types:         Set[SignalType] = field(default_factory=set, compare=False)
+    external_signal_max_intensity: float           = field(default=0.0,         compare=False)
+
+    # Set True by build_features when the external merge changed spike_flag
+    # from False → True, meaning no detection-layer input caused the spike —
+    # only an external signal (e.g. a PROHIBITED NOTAM) did.
+    # Used by classify_regions to apply the dynamic ANOMALY boost.
+    spike_set_by_external: bool = field(default=False, compare=False)
+
+    # Sum of intensities of nearby external signals, capped at _EXT_STRENGTH_CAP.
+    # Drives the dynamic boost formula in classify_regions when
+    # spike_set_by_external is True.
+    external_signal_strength: float = field(default=0.0, compare=False)
+
+    # Debug-only pre-merge snapshot: raw field values captured BEFORE the
+    # external merge step.  Populated only when ENABLE_EXTERNAL_DEBUG=True.
+    # Never included in __init__, repr, or equality checks.
+    _pre_external_snapshot: Optional[Dict] = field(
+        default=None, init=False, repr=False, compare=False,
+    )
 
     # ------------------------------------------------------------------
     # Derived / normalised features  (always 0–1 except flow_balance)
@@ -390,7 +453,96 @@ def _explain(f: RegionFeatures, classification: Classification) -> str:
     if not parts:
         parts.append("pattern matched by weighted feature profile")
 
+    # External signal tag — appended last so it never displaces flight-data evidence.
+    if f.external_signal_count > 0:
+        parts.append("external constraints detected (e.g., no-fly restriction)")
+
     return "; ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# 6.5  EXTERNAL SIGNAL DEBUG HELPERS
+# ---------------------------------------------------------------------------
+# Called only when ENABLE_EXTERNAL_DEBUG is True; zero cost otherwise.
+# Neither function alters any computed value.
+# ---------------------------------------------------------------------------
+
+def _log_external_merge(
+    region:  RegionFeatures,
+    before:  Optional[Dict],
+    ext_map: Dict[str, float],
+) -> None:
+    """
+    Emit a log line showing what changed in *region* after the external merge.
+
+    Parameters
+    ──────────
+    region   Region after merge_external_features() was applied.
+    before   Snapshot dict of the five mutable fields BEFORE the merge.
+    ext_map  The normalised feature dict returned by map_external_signals_to_features.
+    """
+    region_id = f"({region.lat:.1f}, {region.lon:.1f})"
+    types_str = ", ".join(sorted(t.value for t in region.external_signal_types))
+    changes: List[str] = []
+    if before is not None:
+        for fname in (
+            "spike_flag", "coordination_flag",
+            "change_score", "inflow_count", "new_aircraft",
+        ):
+            old = before[fname]
+            new = getattr(region, fname)
+            if old != new:
+                changes.append(f"{fname}: {old!r} -> {new!r}")
+    print(
+        f"[EXT_DBG] merge  {region_id}  "
+        f"n={region.external_signal_count}  "
+        f"n_types={len(region.external_signal_types)}  "
+        f"types=[{types_str}]  "
+        f"max_intensity={region.external_signal_max_intensity:.2f}  "
+        f"strength={region.external_signal_strength:.2f}"
+        + (f"  delta={changes}" if changes else "  (no field changes)")
+    )
+
+
+def _log_classify_impact(
+    f:               RegionFeatures,
+    scores:          Dict[Classification, float],
+    winner:          Classification,
+    baseline_scores: Dict[Classification, float],
+) -> None:
+    """
+    Emit a log line comparing classification scores with/without external merge.
+
+    Parameters
+    ──────────
+    f                Region (post-merge features).
+    scores           Scores computed from the merged feature set.
+    winner           Winning Classification from the merged scores.
+    baseline_scores  Scores recomputed from pre-merge snapshot fields.
+    """
+    region_id          = f"({f.lat:.1f}, {f.lon:.1f})"
+    types_str          = ", ".join(sorted(t.value for t in f.external_signal_types))
+    winner_delta       = scores[winner] - baseline_scores.get(winner, 0.0)
+    base_winner        = max(baseline_scores, key=baseline_scores.__getitem__)
+    external_influence = (
+        winner != base_winner or abs(winner_delta) > _EXT_INFLUENCE_THRESHOLD
+    )
+    change_note = (
+        f"  [WINNER CHANGED: {base_winner.value} -> {winner.value}]"
+        if winner != base_winner else ""
+    )
+    print(
+        f"[EXT_DBG] score  {region_id}  "
+        f"n_types={len(f.external_signal_types)}  "
+        f"types=[{types_str}]  "
+        f"strength={f.external_signal_strength:.2f}  "
+        f"winner={winner.value}  "
+        f"score={scores[winner]:.1f}  "
+        f"baseline={baseline_scores.get(winner, 0.0):.1f}  "
+        f"delta={winner_delta:+.1f}  "
+        f"external_influence={external_influence}"
+        + change_note
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -533,8 +685,50 @@ def build_features(
     # behaviour is preserved unchanged.
     if external_signals:
         for region in regions.values():
+            # Always snapshot spike_flag before merge so that build_features
+            # can determine whether the external merge was the cause of any
+            # change (used for _EXT_ANOMALY_BOOST in classify_regions).
+            pre_spike_flag = region.spike_flag
+
+            # Debug snapshot: capture all five mutable fields BEFORE merge.
+            # Only allocated when debug is on to avoid the dict overhead in
+            # normal operation.
+            if ENABLE_EXTERNAL_DEBUG:
+                region._pre_external_snapshot = {
+                    "spike_flag":        region.spike_flag,
+                    "coordination_flag": region.coordination_flag,
+                    "change_score":      region.change_score,
+                    "inflow_count":      region.inflow_count,
+                    "new_aircraft":      region.new_aircraft,
+                }
+
             ext_map = map_external_signals_to_features(external_signals, region)
             merge_external_features(region, ext_map)
+
+            # Observability: record proximity count, types, and max intensity.
+            # Uses the same radius as map_external_signals_to_features so the
+            # tracking is always consistent with what was actually applied.
+            nearby = [
+                s for s in external_signals
+                if abs(s.lat - region.lat) <= _PROXIMITY_RADIUS
+                and abs(s.lon - region.lon) <= _PROXIMITY_RADIUS
+            ]
+            if nearby:
+                region.external_signal_count         = len(nearby)
+                region.external_signal_types         = {s.signal_type for s in nearby}
+                region.external_signal_max_intensity = max(
+                    s.intensity for s in nearby
+                )
+                region.external_signal_strength      = min(
+                    _EXT_STRENGTH_CAP, sum(s.intensity for s in nearby)
+                )
+                # Goal 2 gating: did the external merge flip spike_flag on?
+                # Only True when detection layer had NOT already set it.
+                if not pre_spike_flag and region.spike_flag:
+                    region.spike_set_by_external = True
+
+            if ENABLE_EXTERNAL_DEBUG and ext_map:
+                _log_external_merge(region, region._pre_external_snapshot, ext_map)
 
     return list(regions.values())
 
@@ -564,10 +758,54 @@ def classify_regions(
 
     for f in features_list:
         if f.aircraft_count < min_aircraft:
-            continue
+            # Goal 1: high-confidence external signals can surface regions that
+            # have fewer aircraft than the minimum.  Safeguard: only RESTRICTED
+            # (0.75) and PROHIBITED (1.00) intensity signals qualify — ADVISORY
+            # (0.25) and WARNING (0.50) cannot bypass the threshold.
+            high_conf_ext = (
+                f.external_signal_count > 0
+                and f.external_signal_max_intensity >= _EXT_BYPASS_INTENSITY
+            )
+            if not high_conf_ext:
+                continue
 
         scores = _score_region(f, context)
+
+        # Goal 2: ANOMALY score boost when spike_flag was set exclusively by
+        # an external signal (pre-existing detection-layer spikes are not boosted).
+        # Boost is dynamic: proportional to signal strength, capped at 25%, with
+        # an extra 5% when ≥2 distinct SignalTypes reinforce the same region.
+        # Applied post-scoring so profile weights stay unchanged and no other
+        # class score is touched.  Cap at 100 to preserve [0, 100].
+        if f.spike_set_by_external:
+            boost = 1.0 + min(
+                _EXT_BOOST_MAX, f.external_signal_strength * _EXT_BOOST_PER_STRENGTH
+            )
+            if len(f.external_signal_types) >= 2:
+                boost += _EXT_BOOST_MULTI_TYPE
+            scores[Classification.ANOMALY] = min(
+                100.0, scores[Classification.ANOMALY] * boost
+            )
+
         winner = max(scores, key=scores.__getitem__)
+
+        # Debug: compare scores before/after external signal merge.
+        # We reconstruct a baseline by reverting the snapshot fields on a
+        # shallow copy — exact (not approximate) because merge_external_features
+        # only touches the five snapshot fields.
+        if ENABLE_EXTERNAL_DEBUG and f.external_signal_count > 0:
+            if f._pre_external_snapshot is not None:
+                baseline_f = copy.copy(f)
+                snap = f._pre_external_snapshot
+                baseline_f.spike_flag        = snap["spike_flag"]
+                baseline_f.coordination_flag = snap["coordination_flag"]
+                baseline_f.change_score      = snap["change_score"]
+                baseline_f.inflow_count      = snap["inflow_count"]
+                baseline_f.new_aircraft      = snap["new_aircraft"]
+                _log_classify_impact(
+                    f, scores, winner, _score_region(baseline_f, context)
+                )
+
         conf   = _confidence(scores, winner, f)
         expl   = _explain(f, winner)
 
