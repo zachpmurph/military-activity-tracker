@@ -1,30 +1,20 @@
 CIVILIAN_PREFIXES = (
-    # Major US
-    "AAL","UAL","DAL","SWA","FFT","JBU","ASA","SKW",
-
+    # Major US carriers
+    "AAL", "UAL", "DAL", "SWA", "FFT", "JBU", "ASA", "SKW",
     # Cargo
-    "FDX","UPS",
-
+    "FDX", "UPS",
     # Europe
-    "DLH","BAW","AFR","KLM","RYR","EZY","VLG",
-
+    "DLH", "BAW", "AFR", "KLM", "RYR", "EZY", "VLG", "SWR", "ITY", "IBE", "SAS", "EJU",
     # Middle East / Asia
-    "QTR","UAE","ETD","SIA","ANA","JAL",
-
+    "QTR", "UAE", "ETD", "SIA", "ANA", "JAL", "SVA",
     # Canada
-    "ACA","WJA","JZA",
-
-    # Latin America
-    "AMX","CMP","BWA","RAM",
-    "WZZ","EZY","RYR","VLG","IBE","SAS",
-    "RPA","SKW","ENY","ASH",
-    "CFE","BAW","DLH","KLM",
-
-    "ASA","EJU","WZZ","RPA","CFE",
-    "SWR","ITY","SVA","BAW","DLH",
-    "AFR","KLM","EZY","RYR"
+    "ACA", "WJA", "JZA",
+    # Latin America / Other
+    "AMX", "CMP", "BWA", "RAM", "WZZ", "IBE", "RPA", "ENY", "ASH", "CFE",
 )
 
+# Checked after CIVILIAN_PREFIXES — no military prefix overlaps with civilian prefixes.
+# Order matters: civilian check must remain first.
 MILITARY_PREFIXES = (
     "REACH", "SPAR", "VENUS", "KNIFE",
     "ASCOT", "TARTAN", "MAGMA", "EVAC",
@@ -32,7 +22,7 @@ MILITARY_PREFIXES = (
 
 
 def classify_aircraft(a):
-    callsign = a["callsign"]
+    callsign = a["callsign"].upper()
 
     if callsign.startswith(CIVILIAN_PREFIXES):
         return "CIVILIAN"

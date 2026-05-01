@@ -48,6 +48,9 @@ class CallsignClassificationTests(unittest.TestCase):
     def test_unknown_callsign_no_mil_hex_still_unknown(self):
         self.assertEqual(classify_aircraft(self._ac("XYZ999", "A12345")), "UNKNOWN")
 
+    def test_lowercase_callsign_normalized(self):
+        self.assertEqual(classify_aircraft(self._ac("reach123")), "MILITARY")
+
 
 if __name__ == "__main__":
     unittest.main()
