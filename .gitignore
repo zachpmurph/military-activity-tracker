@@ -8,4 +8,4 @@ __pycache__/
 
 # Optional: OS junk
 .DS_Store
-Thumbs.db
+Thumbs.db.worktrees/
