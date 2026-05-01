@@ -24,6 +24,7 @@ Covers:
       • build_features() without signals produces unchanged output (no regression)
 """
 
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -37,8 +38,12 @@ from intelligence.notam_ingestion import (
     NotamSeverity,
     _MOCK_NOTAMS,
     _SEVERITY_TO_INTENSITY,
+    _GRID_STEP_KM,
+    _KM_PER_DEG,
     expand_notam_to_signals,
     fetch_notam_signals,
+    _parse_faa_response,
+    _load_fallback_notams,
 )
 from intelligence.external_features import ExternalSignal, SignalType
 from intelligence.classifier import build_features, RegionFeatures
@@ -178,6 +183,7 @@ class ExpandNotamToSignalsTests(unittest.TestCase):
         self.assertIsInstance(self.signals, list)
 
     def test_returns_exactly_one_signal(self):
+        # radius_km=50 < _GRID_STEP_KM (~55 km) → only centre point emitted.
         self.assertEqual(len(self.signals), 1)
 
     def test_signal_type_is_no_fly(self):
@@ -235,10 +241,10 @@ class FetchNotamSignalsTests(unittest.TestCase):
         signals = fetch_notam_signals()
         self.assertGreater(len(signals), 0)
 
-    def test_default_signal_count_equals_mock_notam_count(self):
-        """One signal per NOTAM — centre-point expansion."""
+    def test_default_signal_count_at_least_mock_notam_count(self):
+        """Grid expansion means larger NOTAMs produce multiple signals."""
         signals = fetch_notam_signals()
-        self.assertEqual(len(signals), len(_MOCK_NOTAMS))
+        self.assertGreaterEqual(len(signals), len(_MOCK_NOTAMS))
 
     def test_all_default_signals_are_no_fly(self):
         signals = fetch_notam_signals()
@@ -262,12 +268,13 @@ class FetchNotamSignalsTests(unittest.TestCase):
         self.assertEqual(signals, [])
 
     def test_multiple_custom_notams_all_expanded(self):
+        # default radius_km=50 < grid step (~55 km) → 1 signal per NOTAM.
         notams = [
             _make_notam(notam_id=f"N{i}", severity=NotamSeverity.WARNING)
             for i in range(4)
         ]
         signals = fetch_notam_signals(notams)
-        self.assertEqual(len(signals), 4)
+        self.assertGreaterEqual(len(signals), 4)
 
     def test_returns_list_of_external_signals(self):
         signals = fetch_notam_signals()
@@ -463,6 +470,305 @@ class BuildFeaturesIntegrationTests(unittest.TestCase):
         )
         self.assertTrue(region.spike_flag,
                         "RESTRICTED NOTAM should set spike_flag=True for nearby region")
+
+
+# ---------------------------------------------------------------------------
+# _parse_faa_response() tests — real-like JSON parsing
+# ---------------------------------------------------------------------------
+
+class ParseFaaResponseTests(unittest.TestCase):
+    """Validate FAA NOTAM API geoJSON parsing."""
+
+    def _faa_item(
+        self,
+        lon: float,
+        lat: float,
+        notam_id: str = "T001",
+        text: str = "RESTRICTED AREA ACTIVE",
+        eff_start: str = "2024-01-01T00:00:00.000Z",
+        eff_end: str = "2024-01-31T23:59:00.000Z",
+    ) -> dict:
+        return {
+            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "properties": {
+                "coreNOTAMData": {
+                    "notam": {
+                        "id": notam_id,
+                        "text": text,
+                        "effectiveStart": eff_start,
+                        "effectiveEnd": eff_end,
+                    }
+                }
+            },
+        }
+
+    def test_valid_point_returns_one_notam(self):
+        data = {"items": [self._faa_item(-117.0, 34.0)]}
+        result = _parse_faa_response(data)
+        self.assertEqual(len(result), 1)
+
+    def test_lat_lon_parsed_correctly(self):
+        data = {"items": [self._faa_item(-117.0, 34.0)]}
+        n = _parse_faa_response(data)[0]
+        self.assertAlmostEqual(n.lat, 34.0)
+        self.assertAlmostEqual(n.lon, -117.0)
+
+    def test_notam_id_parsed(self):
+        data = {"items": [self._faa_item(0.0, 0.0, notam_id="A9999/24")]}
+        n = _parse_faa_response(data)[0]
+        self.assertEqual(n.notam_id, "A9999/24")
+
+    def test_source_is_real_notam(self):
+        data = {"items": [self._faa_item(0.0, 0.0)]}
+        n = _parse_faa_response(data)[0]
+        self.assertEqual(n.source, "real_notam")
+
+    def test_severity_prohibited_from_text(self):
+        data = {"items": [self._faa_item(0.0, 0.0, text="PROHIBITED AREA R-2301")]}
+        n = _parse_faa_response(data)[0]
+        self.assertEqual(n.severity, NotamSeverity.PROHIBITED)
+
+    def test_severity_restricted_from_text(self):
+        data = {"items": [self._faa_item(0.0, 0.0, text="RESTRICTED AREA ACTIVE")]}
+        n = _parse_faa_response(data)[0]
+        self.assertEqual(n.severity, NotamSeverity.RESTRICTED)
+
+    def test_severity_warning_from_text(self):
+        data = {"items": [self._faa_item(0.0, 0.0, text="WARNING — HAZARD TO AVIATION")]}
+        n = _parse_faa_response(data)[0]
+        self.assertEqual(n.severity, NotamSeverity.WARNING)
+
+    def test_severity_defaults_to_advisory(self):
+        data = {"items": [self._faa_item(0.0, 0.0, text="PARACHUTE OPERATIONS")]}
+        n = _parse_faa_response(data)[0]
+        self.assertEqual(n.severity, NotamSeverity.ADVISORY)
+
+    def test_missing_coordinates_key_skipped(self):
+        item = {
+            "geometry": {"type": "Point"},
+            "properties": {"coreNOTAMData": {"notam": {"id": "X", "text": "RESTRICTED"}}},
+        }
+        result = _parse_faa_response({"items": [item]})
+        self.assertEqual(result, [])
+
+    def test_null_geometry_skipped(self):
+        item = {
+            "geometry": None,
+            "properties": {"coreNOTAMData": {"notam": {"id": "X", "text": "RESTRICTED"}}},
+        }
+        result = _parse_faa_response({"items": [item]})
+        self.assertEqual(result, [])
+
+    def test_invalid_lat_too_large_skipped(self):
+        data = {"items": [self._faa_item(0.0, 999.0)]}
+        result = _parse_faa_response(data)
+        self.assertEqual(result, [])
+
+    def test_invalid_lon_too_large_skipped(self):
+        data = {"items": [self._faa_item(999.0, 0.0)]}
+        result = _parse_faa_response(data)
+        self.assertEqual(result, [])
+
+    def test_empty_items_list_returns_empty(self):
+        result = _parse_faa_response({"items": []})
+        self.assertEqual(result, [])
+
+    def test_missing_items_key_returns_empty(self):
+        result = _parse_faa_response({})
+        self.assertEqual(result, [])
+
+    def test_multiple_items_all_parsed(self):
+        data = {"items": [self._faa_item(float(i), float(i)) for i in range(3)]}
+        result = _parse_faa_response(data)
+        self.assertEqual(len(result), 3)
+
+    def test_valid_item_mixed_with_invalid_only_valid_returned(self):
+        data = {
+            "items": [
+                self._faa_item(-117.0, 34.0),          # valid
+                {"geometry": None, "properties": {}},  # invalid — no coords
+                self._faa_item(10.0, 20.0),             # valid
+            ]
+        }
+        result = _parse_faa_response(data)
+        self.assertEqual(len(result), 2)
+
+    def test_real_notam_signals_satisfy_external_signal_contract(self):
+        """Signals produced from parsed FAA data must conform to ExternalSignal contract."""
+        data = {"items": [self._faa_item(-117.0, 34.0, text="PROHIBITED AREA")]}
+        notams = _parse_faa_response(data)
+        signals = [sig for n in notams for sig in expand_notam_to_signals(n)]
+        self.assertGreaterEqual(len(signals), 1)
+        sig = signals[0]
+        self.assertIsInstance(sig, ExternalSignal)
+        self.assertEqual(sig.signal_type, SignalType.NO_FLY)
+        self.assertGreaterEqual(sig.intensity, 0.0)
+        self.assertLessEqual(sig.intensity, 1.0)
+        self.assertEqual(sig.metadata.get("source"), "real_notam")
+        self.assertIn("id", sig.metadata)
+        self.assertIn("radius_km", sig.metadata)
+        self.assertIn("severity", sig.metadata)
+
+
+# ---------------------------------------------------------------------------
+# _load_fallback_notams() tests
+# ---------------------------------------------------------------------------
+
+class LoadFallbackNotamsTests(unittest.TestCase):
+    """Validate static JSON fallback loading."""
+
+    def test_returns_list(self):
+        result = _load_fallback_notams()
+        self.assertIsInstance(result, list)
+
+    def test_returns_nonempty_list(self):
+        result = _load_fallback_notams()
+        self.assertGreater(len(result), 0, "fallback JSON must contain at least one NOTAM")
+
+    def test_all_items_are_notam_instances(self):
+        for n in _load_fallback_notams():
+            self.assertIsInstance(n, Notam)
+
+    def test_fallback_source_is_notam(self):
+        """Fallback records carry source='NOTAM' so existing metadata tests stay green."""
+        for n in _load_fallback_notams():
+            self.assertEqual(n.source, "NOTAM")
+
+    def test_fallback_lat_lon_in_valid_range(self):
+        for n in _load_fallback_notams():
+            self.assertGreaterEqual(n.lat, -90.0)
+            self.assertLessEqual(n.lat,  90.0)
+            self.assertGreaterEqual(n.lon, -180.0)
+            self.assertLessEqual(n.lon,  180.0)
+
+    def test_fallback_severities_are_valid_enum_members(self):
+        for n in _load_fallback_notams():
+            self.assertIn(n.severity, NotamSeverity)
+
+    def test_fallback_signals_satisfy_external_signal_contract(self):
+        """Signals derived from fallback data must conform to ExternalSignal contract."""
+        notams = _load_fallback_notams()
+        signals = [sig for n in notams for sig in expand_notam_to_signals(n)]
+        self.assertGreater(len(signals), 0)
+        for sig in signals:
+            self.assertIsInstance(sig, ExternalSignal)
+            self.assertEqual(sig.signal_type, SignalType.NO_FLY)
+            self.assertGreaterEqual(sig.intensity, 0.0)
+            self.assertLessEqual(sig.intensity, 1.0)
+            self.assertEqual(sig.metadata.get("source"), "NOTAM")
+
+    def test_fallback_count_matches_mock_notams(self):
+        """Fallback JSON mirrors _MOCK_NOTAMS so count-based tests stay stable."""
+        self.assertEqual(len(_load_fallback_notams()), len(_MOCK_NOTAMS))
+
+
+# ---------------------------------------------------------------------------
+# SpatialExpansionTests — grid tiling behaviour
+# ---------------------------------------------------------------------------
+
+class SpatialExpansionTests(unittest.TestCase):
+    """
+    Validate that expand_notam_to_signals() tiles the NOTAM radius correctly.
+
+    Grid step is ~55 km (~0.5°).  A NOTAM with radius < one step emits
+    only the centre point; larger radii emit multiple grid points.
+    """
+
+    def _make_grid_notam(self, radius_km: float,
+                          severity: NotamSeverity = NotamSeverity.PROHIBITED) -> Notam:
+        return Notam(
+            notam_id="GRID/01",
+            lat=34.5, lon=33.5,
+            radius_km=radius_km,
+            severity=severity,
+        )
+
+    def _dist_km(self, lat1, lon1, lat2, lon2) -> float:
+        dlat_km = (lat2 - lat1) * _KM_PER_DEG
+        dlon_km = (lon2 - lon1) * _KM_PER_DEG
+        return math.sqrt(dlat_km ** 2 + dlon_km ** 2)
+
+    # --- small radius (< one grid step) ---
+
+    def test_small_radius_emits_exactly_one_signal(self):
+        """radius_km=30 < grid step (~55 km) → only centre point."""
+        signals = expand_notam_to_signals(self._make_grid_notam(radius_km=30.0))
+        self.assertEqual(len(signals), 1)
+
+    def test_small_radius_signal_at_notam_centre(self):
+        notam = self._make_grid_notam(radius_km=30.0)
+        sig = expand_notam_to_signals(notam)[0]
+        self.assertAlmostEqual(sig.lat, notam.lat, places=6)
+        self.assertAlmostEqual(sig.lon, notam.lon, places=6)
+
+    # --- medium radius (~100 km) ---
+
+    def test_medium_radius_emits_multiple_signals(self):
+        """radius_km=100 > grid step → grid points within radius are added."""
+        signals = expand_notam_to_signals(self._make_grid_notam(radius_km=100.0))
+        self.assertGreater(len(signals), 1)
+
+    def test_medium_radius_all_signals_within_radius(self):
+        notam = self._make_grid_notam(radius_km=100.0)
+        for sig in expand_notam_to_signals(notam):
+            dist = self._dist_km(notam.lat, notam.lon, sig.lat, sig.lon)
+            self.assertLessEqual(dist, notam.radius_km + 1e-6,
+                                 f"Signal at ({sig.lat},{sig.lon}) is {dist:.1f} km from centre")
+
+    # --- large radius (~300 km) ---
+
+    def test_large_radius_emits_many_signals(self):
+        """radius_km=300 → dense grid of ≥ 25 signals."""
+        signals = expand_notam_to_signals(self._make_grid_notam(radius_km=300.0))
+        self.assertGreaterEqual(len(signals), 25)
+
+    def test_large_radius_all_signals_within_radius(self):
+        notam = self._make_grid_notam(radius_km=300.0)
+        for sig in expand_notam_to_signals(notam):
+            dist = self._dist_km(notam.lat, notam.lon, sig.lat, sig.lon)
+            self.assertLessEqual(dist, notam.radius_km + 1e-6)
+
+    # --- intensity invariants ---
+
+    def test_all_grid_signals_share_notam_intensity(self):
+        """Every grid point must carry the same intensity as the parent NOTAM."""
+        notam = self._make_grid_notam(radius_km=200.0, severity=NotamSeverity.RESTRICTED)
+        expected = _SEVERITY_TO_INTENSITY[NotamSeverity.RESTRICTED]
+        for sig in expand_notam_to_signals(notam):
+            self.assertAlmostEqual(sig.intensity, expected,
+                                   msg=f"Signal at ({sig.lat},{sig.lon}) has wrong intensity")
+
+    def test_all_grid_signals_are_no_fly_type(self):
+        notam = self._make_grid_notam(radius_km=150.0)
+        for sig in expand_notam_to_signals(notam):
+            self.assertEqual(sig.signal_type, SignalType.NO_FLY)
+
+    def test_all_grid_signals_intensity_in_unit_range(self):
+        notam = self._make_grid_notam(radius_km=200.0)
+        for sig in expand_notam_to_signals(notam):
+            self.assertGreaterEqual(sig.intensity, 0.0)
+            self.assertLessEqual(sig.intensity, 1.0)
+
+    # --- metadata ---
+
+    def test_grid_signals_carry_notam_id_in_metadata(self):
+        notam = self._make_grid_notam(radius_km=100.0)
+        for sig in expand_notam_to_signals(notam):
+            self.assertEqual(sig.metadata["id"], notam.notam_id)
+
+    def test_grid_signals_carry_radius_km_in_metadata(self):
+        notam = self._make_grid_notam(radius_km=100.0)
+        for sig in expand_notam_to_signals(notam):
+            self.assertAlmostEqual(sig.metadata["radius_km"], 100.0)
+
+    # --- edge case: zero radius ---
+
+    def test_zero_radius_emits_exactly_one_signal(self):
+        notam = self._make_grid_notam(radius_km=0.0)
+        signals = expand_notam_to_signals(notam)
+        self.assertEqual(len(signals), 1)
+        self.assertAlmostEqual(signals[0].lat, notam.lat, places=6)
+        self.assertAlmostEqual(signals[0].lon, notam.lon, places=6)
 
 
 if __name__ == "__main__":

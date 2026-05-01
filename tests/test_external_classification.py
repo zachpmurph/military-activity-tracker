@@ -48,6 +48,8 @@ from intelligence.classifier import (
     _EXT_BOOST_MULTI_TYPE,
     _EXT_BOOST_PER_STRENGTH,
     _EXT_BYPASS_INTENSITY,
+    _EXT_COORD_BOOST_MAX,
+    _EXT_CROSS_DOMAIN_BONUS,
     _EXT_INFLUENCE_THRESHOLD,
     _EXT_STRENGTH_CAP,
     _log_classify_impact,
@@ -808,34 +810,50 @@ class SignalStrengthBoostTests(unittest.TestCase):
 
     def test_boost_formula_max_strength_two_types(self):
         """
-        Two different types at 1.0 each → strength=2.0 (= cap), 2 types.
-        boost = 1.0 + min(_EXT_BOOST_MAX, 2.0 × _EXT_BOOST_PER_STRENGTH) + _EXT_BOOST_MULTI_TYPE
-              = 1.0 + 0.20 + 0.05 = 1.25.
+        NO_FLY(1.0) + MARITIME(1.0) → strength=2.0 (cap), 2 types, cross-domain.
+        boost = 1.0
+              + min(_EXT_BOOST_MAX, 2.0 × _EXT_BOOST_PER_STRENGTH)   # 0.20
+              + _EXT_BOOST_MULTI_TYPE                                  # 0.05
+              + _EXT_CROSS_DOMAIN_BONUS                                # 0.05
+              = 1.30.
+
+        Uses recurring_appearances=10 (not 8) so base ANOMALY ≈ 74.6,
+        ensuring 74.6 × 1.30 ≈ 96.9 stays below the 100-cap.
         """
+        # Shared signals for both fixtures — two different types.
+        _signals = [
+            _make_signal(signal_type=SignalType.NO_FLY,  intensity=1.0),
+            _make_signal(signal_type=SignalType.MARITIME, intensity=1.0),
+        ]
+        # detection-set spike → spike_set_by_external=False → no ANOMALY boost
         det_features = build_features(
             coordinated=[(  _LAT, _LON, 50, 0)],
-            recurring=[(    _LAT, _LON,  8, 50, 0)],
+            recurring=[(    _LAT, _LON, 10, 50, 0)],   # 10 windows → lower ANOMALY base
             new_entries=[(  _LAT, _LON,  2, 0)],
-            spikes=[(       _LAT, _LON, 50, 0)],   # detection sets spike → no boost
-            external_signals=[
-                _make_signal(signal_type=SignalType.NO_FLY,   intensity=1.0),
-                _make_signal(signal_type=SignalType.MARITIME,  intensity=1.0),
-            ],
+            spikes=[(       _LAT, _LON, 50, 0)],
+            external_signals=_signals,
         )
-        ext_features = _low_novelty_features([
-            _make_signal(signal_type=SignalType.NO_FLY,   intensity=1.0),
-            _make_signal(signal_type=SignalType.MARITIME,  intensity=1.0),
-        ])
+        # no detection spike → external NO_FLY sets it → spike_set_by_external=True
+        ext_features = build_features(
+            coordinated=[(  _LAT, _LON, 50, 0)],
+            recurring=[(    _LAT, _LON, 10, 50, 0)],
+            new_entries=[(  _LAT, _LON,  2, 0)],
+            external_signals=_signals,
+        )
         det_score = _anomaly_score(det_features)
         ext_score = _anomaly_score(ext_features)
 
         self.assertIsNotNone(ext_score)
         self.assertIsNotNone(det_score)
-        strength      = min(_EXT_STRENGTH_CAP, 2.0)   # 2.0
+        # Verify the cap was not hit (fixture designed for this).
+        self.assertLess(ext_score, 100.0,
+                        "Fixture must not hit the 100-cap; increase persistence further.")
+        strength       = min(_EXT_STRENGTH_CAP, 2.0)
         expected_boost = (
             1.0
             + min(_EXT_BOOST_MAX, strength * _EXT_BOOST_PER_STRENGTH)
             + _EXT_BOOST_MULTI_TYPE
+            + _EXT_CROSS_DOMAIN_BONUS
         )
         if det_score > 0:
             ratio = ext_score / det_score
@@ -859,6 +877,269 @@ class SignalStrengthBoostTests(unittest.TestCase):
         self.assertFalse(region.spike_set_by_external)
         self.assertGreater(region.external_signal_strength, 0.0,
                            "strength field should still be populated")
+
+
+# ---------------------------------------------------------------------------
+# MARITIME signal influence tests
+# ---------------------------------------------------------------------------
+
+def _maritime(lat=_LAT, lon=_LON, intensity=1.0) -> ExternalSignal:
+    return ExternalSignal(
+        signal_type=SignalType.MARITIME, lat=lat, lon=lon,
+        intensity=intensity, metadata={},
+    )
+
+
+def _coord_score(features, lat=_LAT, lon=_LON) -> float | None:
+    """Classify features and return the COORDINATED_ACTIVITY score for the target region."""
+    intel = classify_regions(features, min_aircraft=1)
+    r = _find_intel(intel, lat, lon)
+    return r.all_scores.get("COORDINATED_ACTIVITY", 0.0) if r else None
+
+
+def _base_coord_features(signals=None, aircraft=10, military=3):
+    """
+    Recurring region without any detection-layer coordination/spike flags.
+    Baseline for coordination-boost tests.
+    """
+    return build_features(
+        recurring=[(  _LAT, _LON, 3, aircraft, military)],
+        external_signals=signals,
+    )
+
+
+def _external_spike_coord_features(signals):
+    """
+    Low-novelty region (no detection-layer spike) — same shape as the
+    ANOMALY boost fixture but useful for combined NO_FLY+MARITIME tests.
+    """
+    return build_features(
+        coordinated=[(  _LAT, _LON, 50, 0)],
+        recurring=[(    _LAT, _LON,  8, 50, 0)],
+        new_entries=[(  _LAT, _LON,  2, 0)],
+        external_signals=signals,
+    )
+
+
+class MaritimeSignalTests(unittest.TestCase):
+
+    # --- maritime_signal_strength field ---
+
+    def test_maritime_strength_default_is_zero(self):
+        """Without external signals, maritime_signal_strength must be 0.0."""
+        features = build_features(spikes=[(  _LAT, _LON, 10, 0)])
+        region   = _find_region(features)
+        self.assertIsNotNone(region)
+        self.assertEqual(region.maritime_signal_strength, 0.0)
+
+    def test_maritime_strength_equals_maritime_intensity(self):
+        """Single MARITIME signal at 0.8 → maritime_signal_strength == 0.8."""
+        features = _base_coord_features([_maritime(intensity=0.8)])
+        region   = _find_region(features)
+        self.assertIsNotNone(region)
+        self.assertAlmostEqual(region.maritime_signal_strength, 0.8, places=5)
+
+    def test_maritime_strength_not_affected_by_no_fly(self):
+        """NO_FLY-only signal must leave maritime_signal_strength at 0.0."""
+        features = _base_coord_features([_no_fly(intensity=1.0)])
+        region   = _find_region(features)
+        self.assertIsNotNone(region)
+        self.assertEqual(region.maritime_signal_strength, 0.0)
+
+    def test_maritime_strength_sums_multiple_maritime_signals(self):
+        """Two MARITIME signals at 0.7 each → maritime_signal_strength == 1.4."""
+        features = _base_coord_features([
+            _maritime(intensity=0.7),
+            _maritime(intensity=0.7),
+        ])
+        region = _find_region(features)
+        self.assertIsNotNone(region)
+        self.assertAlmostEqual(region.maritime_signal_strength, 1.4, places=5)
+
+    def test_maritime_strength_capped_at_strength_cap(self):
+        """Three MARITIME signals at 1.0 each → capped at _EXT_STRENGTH_CAP (2.0)."""
+        features = _base_coord_features([
+            _maritime(intensity=1.0),
+            _maritime(intensity=1.0),
+            _maritime(intensity=1.0),
+        ])
+        region = _find_region(features)
+        self.assertIsNotNone(region)
+        self.assertAlmostEqual(region.maritime_signal_strength, _EXT_STRENGTH_CAP, places=5)
+
+    # --- Coordination boost ---
+
+    def test_maritime_boosts_coordination_score(self):
+        """MARITIME signal → COORDINATED_ACTIVITY score higher than baseline."""
+        base    = _coord_score(_base_coord_features(signals=None))
+        boosted = _coord_score(_base_coord_features([_maritime(intensity=1.0)]))
+        self.assertIsNotNone(base)
+        self.assertIsNotNone(boosted)
+        self.assertGreater(boosted, base,
+                           f"MARITIME should boost CA: {boosted:.1f} vs base {base:.1f}")
+
+    def test_stronger_maritime_gives_higher_coordination_score(self):
+        """Higher MARITIME intensity → larger coordination boost."""
+        weak   = _coord_score(_base_coord_features([_maritime(intensity=0.5)]))
+        strong = _coord_score(_base_coord_features([_maritime(intensity=1.0)]))
+        self.assertIsNotNone(weak)
+        self.assertIsNotNone(strong)
+        self.assertGreater(strong, weak,
+                           f"Stronger MARITIME should score higher: {strong:.1f} vs {weak:.1f}")
+
+    def test_maritime_only_does_not_boost_anomaly_without_no_fly(self):
+        """
+        MARITIME alone cannot set spike_set_by_external, so ANOMALY score must
+        equal the un-signalled baseline (only NO_FLY triggers the ANOMALY boost).
+        """
+        no_signal = _base_coord_features(signals=None)
+        maritime  = _base_coord_features([_maritime(intensity=1.0)])
+
+        base_anomaly     = _anomaly_score(no_signal)
+        maritime_anomaly = _anomaly_score(maritime)
+
+        self.assertIsNotNone(base_anomaly)
+        self.assertIsNotNone(maritime_anomaly)
+        self.assertAlmostEqual(
+            base_anomaly, maritime_anomaly, places=1,
+            msg="MARITIME-only must not alter ANOMALY score",
+        )
+
+    # --- Combined NO_FLY + MARITIME (cross-domain) ---
+
+    def test_combined_signals_boost_both_scores(self):
+        """
+        NO_FLY + MARITIME together should raise both ANOMALY (spike) and
+        COORDINATED_ACTIVITY (maritime) above their NO_FLY-only values.
+        """
+        no_fly_only = _external_spike_coord_features([_no_fly(intensity=1.0)])
+        combined    = _external_spike_coord_features([
+            _no_fly(    intensity=1.0),
+            _maritime(  intensity=1.0),
+        ])
+
+        anomaly_nf   = _anomaly_score(no_fly_only)
+        anomaly_comb = _anomaly_score(combined)
+        ca_nf        = _coord_score(no_fly_only)
+        ca_comb      = _coord_score(combined)
+
+        self.assertIsNotNone(anomaly_nf);  self.assertIsNotNone(anomaly_comb)
+        self.assertIsNotNone(ca_nf);       self.assertIsNotNone(ca_comb)
+
+        self.assertGreater(anomaly_comb, anomaly_nf,
+                           f"Cross-domain ANOMALY: {anomaly_comb:.1f} should beat NO_FLY-only {anomaly_nf:.1f}")
+        self.assertGreater(ca_comb, ca_nf,
+                           f"Cross-domain CA: {ca_comb:.1f} should beat NO_FLY-only {ca_nf:.1f}")
+
+    def test_cross_domain_anomaly_higher_than_no_fly_alone(self):
+        """
+        Cross-domain bonus (+_EXT_CROSS_DOMAIN_BONUS) on ANOMALY boost means
+        NO_FLY+MARITIME always scores higher ANOMALY than NO_FLY alone at the
+        same intensity (when spike_set_by_external).
+        """
+        no_fly_only = _external_spike_coord_features([_no_fly(intensity=1.0)])
+        combined    = _external_spike_coord_features([
+            _no_fly(  intensity=1.0),
+            _maritime(intensity=1.0),
+        ])
+        self.assertGreater(
+            _anomaly_score(combined),
+            _anomaly_score(no_fly_only),
+        )
+
+    def test_cross_domain_coordination_higher_than_maritime_alone(self):
+        """
+        Cross-domain bonus on coord_boost means NO_FLY+MARITIME always scores
+        higher COORDINATED_ACTIVITY than MARITIME alone.
+        """
+        maritime_only = _base_coord_features([_maritime(intensity=1.0)])
+        combined      = _base_coord_features([
+            _no_fly(  intensity=1.0),
+            _maritime(intensity=1.0),
+        ])
+        self.assertGreater(
+            _coord_score(combined),
+            _coord_score(maritime_only),
+        )
+
+    # --- Formula verification ---
+
+    def test_coordination_boost_formula_single_maritime(self):
+        """
+        Single MARITIME at intensity=1.0, no cross-domain:
+          coord_boost = 1.0 + min(_EXT_COORD_BOOST_MAX, 1.0 × _EXT_BOOST_PER_STRENGTH)
+                      = 1.0 + 0.10 = 1.10.
+
+        A simple score ratio would conflate the feature-level changes MARITIME
+        makes (coordination_flag, inflow_count) with the post-scoring boost.
+        Instead we verify the formula precisely: compute the raw _score_region
+        result, apply the expected boost, and compare against classify_regions.
+        """
+        features_list = _base_coord_features([_maritime(intensity=1.0)])
+        region        = _find_region(features_list)
+        self.assertIsNotNone(region)
+        self.assertAlmostEqual(region.maritime_signal_strength, 1.0, places=5)
+        # No NO_FLY present → cross_domain is False.
+        self.assertNotIn(SignalType.NO_FLY, region.external_signal_types)
+
+        # Reconstruct the exact context classify_regions uses for this list.
+        context = {
+            "max_inflow": max((f.inflow_count for f in features_list), default=1),
+            "max_change": max((f.change_score for f in features_list), default=40.0),
+        }
+        raw_scores = _score_region(region, context)
+        raw_ca     = raw_scores[Classification.COORDINATED_ACTIVITY]
+
+        expected_boost = 1.0 + min(
+            _EXT_COORD_BOOST_MAX,
+            region.maritime_signal_strength * _EXT_BOOST_PER_STRENGTH,
+        )
+        expected_ca = min(100.0, raw_ca * expected_boost)
+        actual_ca   = _coord_score(features_list)
+
+        self.assertIsNotNone(actual_ca)
+        self.assertAlmostEqual(
+            actual_ca, expected_ca, places=2,
+            msg=f"Expected boosted CA {expected_ca:.2f}, got {actual_ca:.2f}",
+        )
+
+    # --- No-regression ---
+
+    def test_no_maritime_no_coordination_boost(self):
+        """Without MARITIME signals, COORDINATED_ACTIVITY score must be unchanged."""
+        no_signal   = _base_coord_features(signals=None)
+        satellite   = _base_coord_features([
+            ExternalSignal(SignalType.SATELLITE, _LAT, _LON, 1.0),
+        ])
+        self.assertAlmostEqual(
+            _coord_score(no_signal),
+            _coord_score(satellite),
+            places=1,
+            msg="SATELLITE-only must not alter COORDINATED_ACTIVITY score",
+        )
+
+    def test_no_regression_empty_signals(self):
+        """Empty signal list must produce same CA score as no-signal baseline."""
+        no_signal = _base_coord_features(signals=None)
+        empty     = _base_coord_features(signals=[])
+        self.assertAlmostEqual(
+            _coord_score(no_signal),
+            _coord_score(empty),
+            places=5,
+        )
+
+    def test_all_scores_bounded_after_maritime_boost(self):
+        """No classification score should exceed 100 after maritime boost."""
+        features = _base_coord_features([
+            _maritime(intensity=1.0),
+            _maritime(intensity=1.0),
+        ])
+        intel = classify_regions(features, min_aircraft=1)
+        r = _find_intel(intel)
+        if r is not None:
+            for cls, score in r.all_scores.items():
+                self.assertLessEqual(score, 100.0,
+                                     f"{cls} score {score:.1f} exceeds 100")
 
 
 if __name__ == "__main__":

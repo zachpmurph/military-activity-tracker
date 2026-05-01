@@ -42,6 +42,7 @@ from intelligence.external_features import (
     _PROXIMITY_RADIUS,
     _clamp,
     _signals_near,
+    _signals_near_weighted,
     map_external_signals_to_features,
     merge_external_features,
 )
@@ -125,7 +126,8 @@ class SignalsNearTests(unittest.TestCase):
         self.assertEqual(_signals_near([s], 10.0, 20.0), [s])
 
     def test_outside_radius_excluded(self):
-        s = _signal(SignalType.NO_FLY, lat=10.6, lon=20.0)
+        # _PROXIMITY_RADIUS = 1.5°; place signal 1.6° away so it is excluded.
+        s = _signal(SignalType.NO_FLY, lat=11.6, lon=20.0)
         self.assertEqual(_signals_near([s], 10.0, 20.0), [])
 
     def test_custom_radius(self):
@@ -191,13 +193,13 @@ class MapSignalsTests(unittest.TestCase):
         s    = _signal(SignalType.MARITIME, intensity=1.0)
         feat = map_external_signals_to_features([s], _region())
         self.assertIn("inflow_norm", feat)
-        self.assertAlmostEqual(feat["inflow_norm"], 0.6, places=5)
+        self.assertAlmostEqual(feat["inflow_norm"], 0.8, places=5)
 
     def test_maritime_intensity_scaled(self):
         s    = _signal(SignalType.MARITIME, intensity=0.5)
         feat = map_external_signals_to_features([s], _region())
         self.assertAlmostEqual(feat["coordination_flag"], 0.5,  places=5)
-        self.assertAlmostEqual(feat["inflow_norm"],       0.3,  places=5)
+        self.assertAlmostEqual(feat["inflow_norm"],       0.4,  places=5)
 
     # ── SATELLITE mapping ────────────────────────────────────────────────────
 
@@ -292,8 +294,8 @@ class MapSignalsTests(unittest.TestCase):
         self.assertAlmostEqual(feat["coordination_flag"], 0.6,  places=5)
         # change_score_norm: NO_FLY=0.64, SATELLITE=0.35 → max=0.64
         self.assertAlmostEqual(feat["change_score_norm"], 0.64, places=5)
-        # inflow_norm: only MARITIME → 0.36
-        self.assertAlmostEqual(feat["inflow_norm"],       0.36, places=5)
+        # inflow_norm: only MARITIME → 0.6 × 0.80 = 0.48
+        self.assertAlmostEqual(feat["inflow_norm"],       0.48, places=5)
         # novelty: only SATELLITE → 0.25
         self.assertAlmostEqual(feat["novelty"],           0.25, places=5)
 
@@ -631,6 +633,144 @@ class SafeguardTests(unittest.TestCase):
         self.assertEqual(f.recurring_appearances, 5)
         self.assertEqual(f.aircraft_count, 15)
         self.assertEqual(f.military_count, 5)
+
+
+# ---------------------------------------------------------------------------
+# Distance-weighted proximity tests
+# ---------------------------------------------------------------------------
+
+class WeightedProximityTests(unittest.TestCase):
+    """
+    Verifies that _signals_near_weighted computes correct distance weights and
+    that map_external_signals_to_features uses effective_intensity throughout.
+    """
+
+    # --- _signals_near_weighted: weight computation ---
+
+    def test_signal_at_center_weight_is_one(self):
+        """Signal exactly at the region centre → weight = 1.0."""
+        s      = _signal(SignalType.NO_FLY, lat=0.0, lon=0.0, intensity=0.7)
+        result = _signals_near_weighted([s], 0.0, 0.0)
+        self.assertEqual(len(result), 1)
+        _, weight = result[0]
+        self.assertAlmostEqual(weight, 1.0, places=5)
+
+    def test_effective_intensity_at_center_equals_raw(self):
+        """At the centre, effective = raw (weight = 1.0)."""
+        s      = _signal(SignalType.NO_FLY, lat=0.0, lon=0.0, intensity=0.7)
+        sig, w = _signals_near_weighted([s], 0.0, 0.0)[0]
+        self.assertAlmostEqual(sig.intensity * w, 0.7, places=5)
+
+    def test_signal_at_edge_weight_is_zero(self):
+        """Signal exactly at the radius boundary → weight = 0.0 (included but inert)."""
+        s      = _signal(SignalType.NO_FLY, lat=_PROXIMITY_RADIUS, lon=0.0, intensity=1.0)
+        result = _signals_near_weighted([s], 0.0, 0.0)
+        self.assertEqual(len(result), 1,
+                         "Edge signal (distance == radius) must still be returned")
+        _, weight = result[0]
+        self.assertAlmostEqual(weight, 0.0, places=5)
+
+    def test_signal_beyond_radius_excluded(self):
+        """Signal farther than _PROXIMITY_RADIUS must not appear in the result."""
+        s = _signal(SignalType.NO_FLY, lat=_PROXIMITY_RADIUS + 0.1, lon=0.0)
+        self.assertEqual(_signals_near_weighted([s], 0.0, 0.0), [])
+
+    def test_half_radius_weight_is_half(self):
+        """Signal at distance = _PROXIMITY_RADIUS / 2 → weight = 0.5."""
+        half   = _PROXIMITY_RADIUS / 2.0
+        s      = _signal(SignalType.NO_FLY, lat=half, lon=0.0, intensity=1.0)
+        _, w   = _signals_near_weighted([s], 0.0, 0.0)[0]
+        self.assertAlmostEqual(w, 0.5, places=5)
+
+    def test_weight_uses_chebyshev_distance(self):
+        """Weight depends on max(lat_diff, lon_diff), not Euclidean distance."""
+        # lat_diff=0.5, lon_diff=1.0 → Chebyshev=1.0, Euclidean≈1.118
+        s    = _signal(SignalType.NO_FLY, lat=0.5, lon=1.0, intensity=1.0)
+        _, w = _signals_near_weighted([s], 0.0, 0.0)[0]
+        expected_w = 1.0 - (1.0 / _PROXIMITY_RADIUS)   # Chebyshev-based
+        self.assertAlmostEqual(w, expected_w, places=5)
+
+    def test_returns_list_of_tuples(self):
+        """Result must be a list of (ExternalSignal, float) pairs."""
+        s      = _signal(SignalType.MARITIME, lat=0.2, lon=0.0, intensity=0.6)
+        result = _signals_near_weighted([s], 0.0, 0.0)
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 1)
+        sig, weight = result[0]
+        self.assertIsInstance(sig,    ExternalSignal)
+        self.assertIsInstance(weight, float)
+
+    def test_empty_signals_returns_empty(self):
+        self.assertEqual(_signals_near_weighted([], 0.0, 0.0), [])
+
+    # --- map_external_signals_to_features: effective_intensity applied ---
+
+    def test_feature_value_reflects_weighted_intensity(self):
+        """
+        Signal at distance = _PROXIMITY_RADIUS/2 → weight = 0.5.
+        NO_FLY at intensity=1.0: spike_flag = effective = 1.0 × 0.5 = 0.5.
+        """
+        region = _region(lat=0.0, lon=0.0)
+        s      = _signal(SignalType.NO_FLY, lat=_PROXIMITY_RADIUS / 2, lon=0.0, intensity=1.0)
+        feat   = map_external_signals_to_features([s], region)
+        self.assertAlmostEqual(feat["spike_flag"], 0.5, places=5)
+
+    def test_closer_signal_higher_effective_intensity(self):
+        """
+        Two NO_FLY signals with same raw intensity; closer one → higher spike_flag.
+        """
+        region  = _region(lat=0.0, lon=0.0)
+        s_near  = _signal(SignalType.NO_FLY, lat=0.3, lon=0.0, intensity=1.0)
+        s_far   = _signal(SignalType.NO_FLY, lat=1.0, lon=0.0, intensity=1.0)
+        feat_near = map_external_signals_to_features([s_near], region)
+        feat_far  = map_external_signals_to_features([s_far],  region)
+        self.assertGreater(
+            feat_near["spike_flag"], feat_far["spike_flag"],
+            f"Closer spike_flag {feat_near['spike_flag']:.3f} "
+            f"should exceed farther {feat_far['spike_flag']:.3f}",
+        )
+
+    def test_max_aggregation_uses_effective_intensity(self):
+        """
+        Two NO_FLY signals: one strong-and-close, one intense-but-far.
+        Max effective intensity wins (not max raw intensity).
+
+        s_close: distance=0,   intensity=0.8 → eff=0.80
+        s_far:   distance=1.0, intensity=1.0 → eff=1.0×(1-1.0/1.5)≈0.33
+        expected max effective = 0.80 (close signal wins).
+        """
+        region   = _region(lat=0.0, lon=0.0)
+        s_close  = _signal(SignalType.NO_FLY, lat=0.0, lon=0.0, intensity=0.8)
+        s_far    = _signal(SignalType.NO_FLY, lat=1.0, lon=0.0, intensity=1.0)
+        feat     = map_external_signals_to_features([s_close, s_far], region)
+        self.assertAlmostEqual(feat["spike_flag"], 0.8, places=5)
+
+    def test_output_clamped_with_weighted_intensity(self):
+        """All output values remain in [0, 1] even with distance weighting."""
+        signals = [
+            _signal(SignalType.NO_FLY,    lat=0.2, lon=0.0, intensity=1.0),
+            _signal(SignalType.MARITIME,  lat=0.5, lon=0.0, intensity=1.0),
+            _signal(SignalType.SATELLITE, lat=0.8, lon=0.0, intensity=1.0),
+        ]
+        feat = map_external_signals_to_features(signals, _region(lat=0.0, lon=0.0))
+        for key, val in feat.items():
+            self.assertGreaterEqual(val, 0.0, f"{key} below 0: {val}")
+            self.assertLessEqual(val,   1.0, f"{key} above 1: {val}")
+
+    def test_farther_region_lower_influence_than_closer(self):
+        """
+        Same signal; region at distance=0 gets higher change_score than
+        region at distance=0.5 (via NO_FLY change_score_norm pathway).
+        """
+        sig      = ExternalSignal(SignalType.NO_FLY, lat=0.0, lon=0.0, intensity=1.0)
+        r_close  = _region(lat=0.0, lon=0.0)
+        r_mid    = _region(lat=0.5, lon=0.0)
+        feat_close = map_external_signals_to_features([sig], r_close)
+        feat_mid   = map_external_signals_to_features([sig], r_mid)
+        self.assertGreater(
+            feat_close.get("change_score_norm", 0.0),
+            feat_mid.get("change_score_norm",   0.0),
+        )
 
 
 if __name__ == "__main__":
