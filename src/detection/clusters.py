@@ -15,7 +15,7 @@ def recurring_regions(cursor):
                 CAST(timestamp / 1800 AS INTEGER) AS bucket,
                 COUNT(DISTINCT icao24) AS aircraft_count,
                 COUNT(DISTINCT CASE
-                    WHEN type IN ('US_CARGO', 'UK_CARGO', 'TANKER') THEN icao24
+                    WHEN type IN ('US_CARGO', 'UK_CARGO', 'TANKER', 'MILITARY') THEN icao24
                 END) AS military_count,
                 AVG(score) AS avg_score
             FROM aircraft_positions
@@ -54,7 +54,7 @@ def coordinated_activity(cursor):
             lon_bin,
             COUNT(DISTINCT icao24) AS aircraft_count,
             COUNT(DISTINCT CASE
-                WHEN type IN ('US_CARGO', 'UK_CARGO', 'TANKER') THEN icao24
+                WHEN type IN ('US_CARGO', 'UK_CARGO', 'TANKER', 'MILITARY') THEN icao24
             END) AS military_count
         FROM aircraft_positions
         WHERE timestamp > ?
@@ -84,7 +84,7 @@ def detect_spikes(cursor):
                 lon_bin,
                 COUNT(DISTINCT icao24) AS aircraft_count,
                 COUNT(DISTINCT CASE
-                    WHEN type IN ('US_CARGO', 'UK_CARGO', 'TANKER') THEN icao24
+                    WHEN type IN ('US_CARGO', 'UK_CARGO', 'TANKER', 'MILITARY') THEN icao24
                 END) AS military_count
             FROM aircraft_positions
             WHERE timestamp > ?

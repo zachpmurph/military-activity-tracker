@@ -25,12 +25,20 @@ CIVILIAN_PREFIXES = (
     "AFR","KLM","EZY","RYR"
 )
 
+MILITARY_PREFIXES = (
+    "REACH", "SPAR", "VENUS", "KNIFE",
+    "ASCOT", "TARTAN", "MAGMA", "EVAC",
+)
+
 
 def classify_aircraft(a):
     callsign = a["callsign"]
 
     if callsign.startswith(CIVILIAN_PREFIXES):
         return "CIVILIAN"
+
+    if callsign.startswith(MILITARY_PREFIXES):
+        return "MILITARY"
 
     if callsign.startswith("RCH"):
         return "US_CARGO"

@@ -103,7 +103,7 @@ def persistent_aircraft(cursor):
         WHERE timestamp > ?
         AND callsign != ''
         AND (
-            type IN ('US_CARGO', 'UK_CARGO', 'TANKER')
+            type IN ('US_CARGO', 'UK_CARGO', 'TANKER', 'MILITARY')
             OR score >= 6
             OR behavior = 'LOITERING'
         )
@@ -130,7 +130,7 @@ def military_cluster(cursor):
             COUNT(DISTINCT icao24) as unique_aircraft
         FROM aircraft_positions
         WHERE timestamp > ?
-          AND type IN ('US_CARGO', 'UK_CARGO')
+          AND type IN ('US_CARGO', 'UK_CARGO', 'MILITARY')
         GROUP BY type
         ORDER BY total_sightings DESC;
     """, (cutoff,))
