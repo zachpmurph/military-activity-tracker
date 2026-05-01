@@ -10,7 +10,7 @@ CIVILIAN_PREFIXES = (
     # Canada
     "ACA", "WJA", "JZA",
     # Latin America / Other
-    "AMX", "CMP", "BWA", "RAM", "WZZ", "IBE", "RPA", "ENY", "ASH", "CFE",
+    "AMX", "CMP", "BWA", "RAM", "WZZ", "RPA", "ENY", "ASH", "CFE",
 )
 
 # Checked after CIVILIAN_PREFIXES — no military prefix overlaps with civilian prefixes.
