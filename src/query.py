@@ -13,6 +13,9 @@ from detection.movements import detect_movements
 from detection.staging import detect_staging_and_projection
 from intelligence.classifier import build_features, classify_regions
 from intelligence.notam_ingestion import fetch_notam_signals
+from intelligence.maritime_ingestion import fetch_maritime_signals
+from intelligence.satellite_ingestion import fetch_satellite_signals
+from intelligence.ais_ingestion import fetch_ais_signals
 
 
 # ---------------------------------------------------------------------------
@@ -331,10 +334,20 @@ def main():
     _changes     = detect_activity_changes(cursor) or []
     detect_linked_regions(cursor)
 
-    # External signals (NOTAM / no-fly zones).
+    # External signals (NOTAM + maritime vessel traffic + satellite change detection).
     # Skipped entirely when ENABLE_EXTERNAL_SIGNALS is False so the pipeline
-    # behaves identically to pre-NOTAM behaviour — useful for A/B comparisons.
-    _notam_signals = fetch_notam_signals() if ENABLE_EXTERNAL_SIGNALS else []
+    # behaves identically to pre-external-signal behaviour.
+    if ENABLE_EXTERNAL_SIGNALS:
+        _notam_signals     = fetch_notam_signals()
+        _maritime_signals  = fetch_maritime_signals()
+        _satellite_signals = fetch_satellite_signals()
+        _ais_signals       = fetch_ais_signals()
+    else:
+        _notam_signals     = []
+        _maritime_signals  = []
+        _satellite_signals = []
+        _ais_signals       = []
+    _external_signals = _notam_signals + _maritime_signals + _satellite_signals + _ais_signals
 
     # Intelligence classification
     features = build_features(
@@ -346,7 +359,7 @@ def main():
         staging          = _staging,
         projection       = _projection,
         activity_changes = _changes,
-        external_signals = _notam_signals if _notam_signals else None,
+        external_signals = _external_signals or None,
     )
     intelligence = classify_regions(features)
 
@@ -355,7 +368,7 @@ def main():
         print(region)
 
     # External signal influence summary
-    _print_external_summary(_compute_external_summary(_notam_signals, features))
+    _print_external_summary(_compute_external_summary(_external_signals, features))
 
     conn.close()
 

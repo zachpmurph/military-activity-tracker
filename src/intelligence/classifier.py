@@ -69,6 +69,7 @@ _EXT_COORD_BOOST_MAX:     float = 0.20  # ceiling on the COORDINATED_ACTIVITY bo
 _EXT_CROSS_DOMAIN_BONUS:  float = 0.05  # additive bonus to both boosts when NO_FLY+MARITIME
 _EXT_INFLUENCE_THRESHOLD: float = 5.0   # min |score delta| to mark external_influence=True
 _EXT_BYPASS_INTENSITY:    float = 0.75  # min signal intensity to waive min_aircraft guard
+_EXT_BYPASS_MIN_STRENGTH: float = 0.10  # min effective signal strength to waive min_aircraft guard
 
 
 # ---------------------------------------------------------------------------
@@ -792,10 +793,18 @@ def classify_regions(
     if not features_list:
         return []
 
-    # Cross-region normalisation context
+    # Cross-region normalisation context.
+    # max_change is floored at _MAX_CHANGE_SCORE so that change_score_norm for
+    # any region is always computed against the design ceiling (40.0), not
+    # against a dynamic batch maximum.  Without this floor, a single high-change
+    # outlier silently compresses every other region's change_score_norm,
+    # reducing ANOMALY scores by up to 10 pts and flipping classifications.
     context: Dict[str, float] = {
         "max_inflow": max((f.inflow_count  for f in features_list), default=1),
-        "max_change": max((f.change_score  for f in features_list), default=_MAX_CHANGE_SCORE),
+        "max_change": max(
+            max((f.change_score  for f in features_list), default=_MAX_CHANGE_SCORE),
+            _MAX_CHANGE_SCORE,
+        ),
     }
 
     results: List[RegionIntelligence] = []
@@ -809,6 +818,7 @@ def classify_regions(
             high_conf_ext = (
                 f.external_signal_count > 0
                 and f.external_signal_max_intensity >= _EXT_BYPASS_INTENSITY
+                and f.external_signal_strength    >= _EXT_BYPASS_MIN_STRENGTH
             )
             if not high_conf_ext:
                 continue
