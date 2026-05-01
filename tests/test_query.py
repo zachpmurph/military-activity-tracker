@@ -373,6 +373,49 @@ class DetectActivityChangesCapsTests(RecurringRegionsTests):
         self.assertLess(result_lines.index(mil_lines[0]), result_lines.index(summary_lines[0]))
 
 
+    def test_civilian_surge_threshold_is_50_not_25(self):
+        """30-aircraft surge no longer triggers bonus at threshold 50; 55-aircraft surge still does."""
+        import ast
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+
+        now = 800_000
+
+        # 30-aircraft surge — was triggering at threshold 25, must NOT trigger at 50
+        # prior aircraft enables persistence_bonus + score_delta path to reach MEDIUM
+        self.insert_position("c30-prior", 52.01, 13.01, now - 4_000, "UNKNOWN", 1)
+        for i in range(30):
+            self.insert_position(f"c30-{i}", 52.01, 13.01, now - 300, "UNKNOWN", 7)
+
+        # 55-aircraft surge — must still trigger above threshold 50
+        # prior aircraft enables persistence_bonus + score_delta path to reach MEDIUM
+        self.insert_position("c55-prior", 53.01, 14.01, now - 4_000, "UNKNOWN", 1)
+        for i in range(55):
+            self.insert_position(f"c55-{i}", 53.01, 14.01, now - 300, "UNKNOWN", 7)
+
+        self.connection.commit()
+
+        output = io.StringIO()
+        with patch.object(query.time, "time", return_value=now):
+            with redirect_stdout(output):
+                query.detect_activity_changes(self.cursor)
+
+        lines = [l.strip() for l in output.getvalue().splitlines() if l.strip().startswith("(")]
+
+        # 30-aircraft region: if it appears, must NOT have CIVILIAN_SURGE tag
+        c30_lines = [l for l in lines if "52." in l]
+        for l in c30_lines:
+            row = ast.literal_eval(l)
+            self.assertNotIn("CIVILIAN_SURGE", str(row[8]))
+
+        # 55-aircraft region: must appear and MUST have CIVILIAN_SURGE tag
+        c55_lines = [l for l in lines if "53." in l]
+        self.assertEqual(len(c55_lines), 1)
+        row = ast.literal_eval(c55_lines[0])
+        self.assertIn("CIVILIAN_SURGE", str(row[8]))
+
+
 class EdgeCaseTests(RecurringRegionsTests):
     def _run(self, now):
         output = io.StringIO()
