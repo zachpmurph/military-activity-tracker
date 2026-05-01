@@ -21,6 +21,21 @@ MILITARY_PREFIXES = (
 )
 
 
+_US_MIL_LOW  = 0xAE0000
+_US_MIL_HIGH = 0xAEFFFF
+_UK_MIL_LOW  = 0x43C000
+_UK_MIL_HIGH = 0x43CFFF
+
+
+def _is_military_hex(icao24: str) -> bool:
+    try:
+        val = int(icao24, 16)
+    except (ValueError, TypeError):
+        return False
+    return (_US_MIL_LOW <= val <= _US_MIL_HIGH or
+            _UK_MIL_LOW <= val <= _UK_MIL_HIGH)
+
+
 def classify_aircraft(a):
     callsign = a["callsign"].upper()
 
@@ -39,4 +54,6 @@ def classify_aircraft(a):
     if callsign.startswith("RRR"):
         return "UK_CARGO"
 
+    if _is_military_hex(a.get("icao24", "")):
+        return "MILITARY"
     return "UNKNOWN"

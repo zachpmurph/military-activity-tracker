@@ -52,5 +52,59 @@ class CallsignClassificationTests(unittest.TestCase):
         self.assertEqual(classify_aircraft(self._ac("reach123")), "MILITARY")
 
 
+class IcaoHexRangeTests(unittest.TestCase):
+
+    def _ac(self, callsign, icao24):
+        return {"callsign": callsign, "icao24": icao24}
+
+    def test_us_mil_lower_bound(self):
+        from core.config import _is_military_hex
+        self.assertTrue(_is_military_hex("AE0000"))
+
+    def test_us_mil_mid_range(self):
+        from core.config import _is_military_hex
+        self.assertTrue(_is_military_hex("AE1234"))
+
+    def test_us_mil_upper_bound(self):
+        from core.config import _is_military_hex
+        self.assertTrue(_is_military_hex("AEFFFF"))
+
+    def test_uk_mil_lower_bound(self):
+        from core.config import _is_military_hex
+        self.assertTrue(_is_military_hex("43C000"))
+
+    def test_uk_mil_mid_range(self):
+        from core.config import _is_military_hex
+        self.assertTrue(_is_military_hex("43C500"))
+
+    def test_uk_mil_upper_bound(self):
+        from core.config import _is_military_hex
+        self.assertTrue(_is_military_hex("43CFFF"))
+
+    def test_civilian_hex_returns_false(self):
+        from core.config import _is_military_hex
+        self.assertFalse(_is_military_hex("A12345"))
+
+    def test_zero_hex_returns_false(self):
+        from core.config import _is_military_hex
+        self.assertFalse(_is_military_hex("000000"))
+
+    def test_max_hex_returns_false(self):
+        from core.config import _is_military_hex
+        self.assertFalse(_is_military_hex("FFFFFF"))
+
+    def test_unknown_callsign_us_mil_hex_classified_military(self):
+        self.assertEqual(classify_aircraft(self._ac("XYZ999", "AE1234")), "MILITARY")
+
+    def test_unknown_callsign_uk_mil_hex_classified_military(self):
+        self.assertEqual(classify_aircraft(self._ac("XYZ999", "43C500")), "MILITARY")
+
+    def test_unknown_callsign_civilian_hex_still_unknown(self):
+        self.assertEqual(classify_aircraft(self._ac("XYZ999", "A12345")), "UNKNOWN")
+
+    def test_named_military_callsign_wins_over_civilian_hex(self):
+        self.assertEqual(classify_aircraft(self._ac("REACH1", "A12345")), "MILITARY")
+
+
 if __name__ == "__main__":
     unittest.main()
