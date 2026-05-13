@@ -16,4 +16,7 @@ def normalize_aircraft(raw):
         "altitude": to_float(raw.get("altitude")),
         "velocity": to_float(raw.get("velocity")),
         "source": raw.get("source"),
+        "source_name": raw.get("source_name", "unknown"),
+        "source_tier": raw.get("source_tier", "unknown"),
+        "theater_id": raw.get("theater_id"),
     }

@@ -13,42 +13,59 @@ def update_aircraft_track(a, now):
     icao24 = a.get("icao24")
     lat = a.get("lat")
     lon = a.get("lon")
+    aircraft_type = classify_aircraft(a)
 
     if not icao24 or lat is None or lon is None:
         return
 
-    existing_track = cursor.execute("""
+    existing_track = cursor.execute(
+        """
         SELECT first_seen, start_lat, start_lon, max_distance
         FROM aircraft_tracks
         WHERE icao24 = ?
-    """, (icao24,)).fetchone()
+        """,
+        (icao24,),
+    ).fetchone()
 
     if not existing_track:
-        cursor.execute("""
-            INSERT INTO aircraft_tracks
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (icao24, now, now, lat, lon, lat, lon, 0.0))
+        cursor.execute(
+            """
+            INSERT INTO aircraft_tracks (
+                icao24, first_seen, last_seen, start_lat, start_lon,
+                end_lat, end_lon, max_distance, type
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (icao24, now, now, lat, lon, lat, lon, 0.0, aircraft_type),
+        )
         return
 
     first_seen, start_lat, start_lon, max_distance = existing_track
     distance = euclidean_distance(start_lat, start_lon, lat, lon)
 
-    cursor.execute("""
+    cursor.execute(
+        """
         UPDATE aircraft_tracks
         SET last_seen = ?,
             end_lat = ?,
             end_lon = ?,
-            max_distance = ?
+            max_distance = ?,
+            type = ?
         WHERE icao24 = ?
-    """, (now, lat, lon, max(max_distance, distance), icao24))
+        """,
+        (now, lat, lon, max(max_distance, distance), aircraft_type, icao24),
+    )
 
 
 def cleanup_old_tracks(now):
     cutoff = now - (6 * 3600)
-    cursor.execute("""
+    cursor.execute(
+        """
         DELETE FROM aircraft_tracks
         WHERE last_seen < ?
-    """, (cutoff,))
+        """,
+        (cutoff,),
+    )
 
 
 def store_aircraft(aircraft_list):
@@ -64,23 +81,31 @@ def store_aircraft(aircraft_list):
         if score < 2:
             continue
 
-        cursor.execute("""
-        INSERT INTO aircraft_positions
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            a["icao24"],
-            a["callsign"],
-            a["lat"],
-            a["lon"],
-            a["altitude"],
-            a["velocity"],
-            now,
-            classification,
-            behavior,
-            score,
-            round(a["lat"], 1),
-            round(a["lon"], 1),
-        ))
+        cursor.execute(
+            """
+            INSERT INTO aircraft_positions (
+                icao24, callsign, lat, lon, altitude, speed, timestamp,
+                type, behavior, score, lat_bin, lon_bin, source_name, source_tier
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                a["icao24"],
+                a["callsign"],
+                a["lat"],
+                a["lon"],
+                a["altitude"],
+                a["velocity"],
+                now,
+                classification,
+                behavior,
+                score,
+                round(a["lat"], 1),
+                round(a["lon"], 1),
+                a.get("source_name", "unknown"),
+                a.get("source_tier", "unknown"),
+            ),
+        )
 
     cleanup_old_tracks(now)
     conn.commit()

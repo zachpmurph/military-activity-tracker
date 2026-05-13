@@ -1,0 +1,4 @@
+interface:
+  display_name: "Query Regression"
+  short_description: "Validate query and detection changes"
+  default_prompt: "Use $query-regression to update query or detection logic and verify SQLite-based outputs."

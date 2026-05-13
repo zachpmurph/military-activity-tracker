@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test Selection"
+  short_description: "Choose focused tests for repo changes"
+  default_prompt: "Use $test-selection to pick and run the smallest reliable test subset for this change."

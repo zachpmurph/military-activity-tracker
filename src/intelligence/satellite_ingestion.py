@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from core.db import resolve_db_path
 from intelligence.external_features import ExternalSignal, SignalType
 
 
@@ -47,7 +48,7 @@ from intelligence.external_features import ExternalSignal, SignalType
 # Constants
 # ---------------------------------------------------------------------------
 
-_DB_PATH       = Path(__file__).resolve().parent.parent / "data" / "aircraft.db"
+_DB_PATH       = resolve_db_path()
 _FALLBACK_JSON = Path(__file__).resolve().parent.parent / "data" / "satellite_fallback.json"
 
 _CURRENT_WINDOW_SECS = 30 * 60    # 30 minutes  — "now" snapshot

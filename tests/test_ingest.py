@@ -28,7 +28,9 @@ def setup_test_db():
             behavior TEXT,
             score INTEGER,
             lat_bin REAL,
-            lon_bin REAL
+            lon_bin REAL,
+            source_name TEXT,
+            source_tier TEXT
         )
     """)
 
@@ -42,6 +44,7 @@ def setup_test_db():
             end_lat REAL,
             end_lon REAL,
             max_distance REAL,
+            type TEXT,
             PRIMARY KEY (icao24)
         )
     """)
@@ -70,37 +73,49 @@ class AircraftTracksTests(unittest.TestCase):
             "altitude": 30000,
             "velocity": 400,
             "source": "adsb",
+            "source_name": "adsb",
+            "source_tier": "primary_live",
         }
 
     def test_store_aircraft_updates_persistent_tracks(self):
         persistence.cursor.execute("""
             INSERT INTO aircraft_tracks
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, ("stale1", 1, 2, 10.0, 10.0, 10.0, 10.0, 0.0))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, ("stale1", 1, 2, 10.0, 10.0, 10.0, 10.0, 0.0, "UNKNOWN"))
         persistence.conn.commit()
 
         with patch.object(persistence.time, "time", return_value=100_000):
             persistence.store_aircraft([self.make_aircraft("abc123", 34.0, -117.0)])
 
         row = persistence.cursor.execute("""
-            SELECT first_seen, last_seen, start_lat, start_lon, end_lat, end_lon, max_distance
+            SELECT first_seen, last_seen, start_lat, start_lon, end_lat, end_lon, max_distance, type
             FROM aircraft_tracks
             WHERE icao24 = 'abc123'
         """).fetchone()
 
-        self.assertEqual(row, (100_000, 100_000, 34.0, -117.0, 34.0, -117.0, 0.0))
+        self.assertEqual(row, (100_000, 100_000, 34.0, -117.0, 34.0, -117.0, 0.0, "US_CARGO"))
 
         with patch.object(persistence.time, "time", return_value=100_600):
             persistence.store_aircraft([self.make_aircraft("abc123", 34.6, -116.2)])
 
         updated_row = persistence.cursor.execute("""
-            SELECT first_seen, last_seen, start_lat, start_lon, end_lat, end_lon, max_distance
+            SELECT first_seen, last_seen, start_lat, start_lon, end_lat, end_lon, max_distance, type
             FROM aircraft_tracks
             WHERE icao24 = 'abc123'
         """).fetchone()
 
         self.assertEqual(updated_row[:6], (100_000, 100_600, 34.0, -117.0, 34.6, -116.2))
         self.assertAlmostEqual(updated_row[6], math.sqrt((0.6 ** 2) + (0.8 ** 2)))
+        self.assertEqual(updated_row[7], "US_CARGO")
+
+        position_row = persistence.cursor.execute("""
+            SELECT source_name, source_tier, type
+            FROM aircraft_positions
+            WHERE icao24 = 'abc123'
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """).fetchone()
+        self.assertEqual(position_row, ("adsb", "primary_live", "US_CARGO"))
 
         stale_row = persistence.cursor.execute("""
             SELECT icao24

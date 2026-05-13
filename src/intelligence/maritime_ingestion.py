@@ -232,7 +232,7 @@ def _builtin_signals() -> List[ExternalSignal]:
 # Public API
 # ---------------------------------------------------------------------------
 
-def fetch_maritime_signals() -> List[ExternalSignal]:
+def fetch_maritime_signals(allow_fallback: bool = True) -> List[ExternalSignal]:
     """
     Return MARITIME ExternalSignal objects from vessel traffic data.
 
@@ -250,14 +250,16 @@ def fetch_maritime_signals() -> List[ExternalSignal]:
     All intensities are guaranteed to be in [0, 1].
     """
     global _SIGNAL_CACHE
-    if _SIGNAL_CACHE is not None:
+    if allow_fallback and _SIGNAL_CACHE is not None:
         return _SIGNAL_CACHE
 
     signals = _fetch_gfw_vessels()
-    if signals is None:
+    if signals is None and allow_fallback:
         signals = _load_fallback_signals()
-    if not signals:
+    if not signals and allow_fallback:
         signals = _builtin_signals()
 
-    _SIGNAL_CACHE = signals
-    return _SIGNAL_CACHE
+    if allow_fallback:
+        _SIGNAL_CACHE = signals
+        return _SIGNAL_CACHE
+    return signals or []

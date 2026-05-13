@@ -37,6 +37,7 @@ import os
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -172,6 +173,9 @@ _MOCK_NOTAMS: List[Notam] = [
 _FAA_TOKEN_URL = "https://external-api.faa.gov/notamapi/v1/token"
 _FAA_NOTAM_URL = "https://external-api.faa.gov/notamapi/v1/notams"
 _FAA_TIMEOUT   = 4   # seconds per request
+_AVIATIONWEATHER_AIRSIGMET_URL = "https://aviationweather.gov/api/data/airsigmet?format=json"
+_AVIATIONWEATHER_GAIRMET_URL   = "https://aviationweather.gov/api/data/gairmet?format=json"
+_AVIATIONWEATHER_TIMEOUT       = 4
 
 _FALLBACK_JSON = Path(__file__).resolve().parent.parent / "data" / "notams_fallback.json"
 
@@ -193,6 +197,132 @@ def _text_to_severity(text: str) -> NotamSeverity:
         if keyword in upper:
             return severity
     return NotamSeverity.ADVISORY
+
+
+def _epoch_to_iso8601(value: object) -> Optional[str]:
+    """Convert an epoch timestamp to UTC ISO-8601, or None when unavailable."""
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _coords_to_region(coords: object) -> Optional[tuple]:
+    """
+    Return ``(center_lat, center_lon, radius_km)`` for an advisory polygon.
+
+    Coordinates are expected to be a list of ``{"lat": ..., "lon": ...}``
+    dictionaries. Invalid or out-of-range points are skipped.
+    """
+    if not isinstance(coords, list):
+        return None
+
+    points = []
+    for point in coords:
+        try:
+            lat = float(point["lat"])
+            lon = float(point["lon"])
+            if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+                points.append((lat, lon))
+        except (TypeError, ValueError, KeyError):
+            continue
+
+    if not points:
+        return None
+
+    center_lat = sum(lat for lat, _ in points) / len(points)
+    center_lon = sum(lon for _, lon in points) / len(points)
+    radius_km = max(
+        math.sqrt((lat - center_lat) ** 2 + (lon - center_lon) ** 2) * _KM_PER_DEG
+        for lat, lon in points
+    )
+    return center_lat, center_lon, max(radius_km, 30.0)
+
+
+def _airsigmet_to_severity(item: dict) -> NotamSeverity:
+    """
+    Infer a NOTAM-style severity from an AviationWeather SIGMET hazard.
+
+    Convective and volcanic hazards are treated as the strongest warnings;
+    other SIGMET hazards are treated as restricted-airspace equivalents.
+    """
+    hazard = str(item.get("hazard") or "").upper()
+    if hazard in {"CONVECTIVE", "VOLCANIC ASH"}:
+        return NotamSeverity.PROHIBITED
+    return NotamSeverity.RESTRICTED
+
+
+def _gairmet_to_severity(item: dict) -> NotamSeverity:
+    """
+    Infer a NOTAM-style severity from an AviationWeather G-AIRMET hazard.
+
+    G-AIRMETs are advisories rather than hard restrictions, so they map to
+    WARNING by default.
+    """
+    hazard = str(item.get("hazard") or "").upper()
+    if hazard in {"IFR", "ICE", "TURB", "MTN_OBSCN"}:
+        return NotamSeverity.WARNING
+    return NotamSeverity.ADVISORY
+
+
+def _parse_aviationweather_airsigmet_response(items: object) -> List[Notam]:
+    """Parse AviationWeather SIGMET JSON into Notam objects."""
+    if not isinstance(items, list):
+        return []
+
+    notams: List[Notam] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        region = _coords_to_region(item.get("coords"))
+        if region is None:
+            continue
+
+        center_lat, center_lon, radius_km = region
+        series_id = str(item.get("seriesId") or item.get("alphaChar") or "UNKNOWN")
+        description = str(item.get("rawAirSigmet") or item.get("hazard") or "SIGMET")
+        notams.append(Notam(
+            notam_id       = f"SIGMET-{series_id}",
+            lat            = center_lat,
+            lon            = center_lon,
+            radius_km      = radius_km,
+            severity       = _airsigmet_to_severity(item),
+            description    = description[:200],
+            effective_from = _epoch_to_iso8601(item.get("validTimeFrom")),
+            effective_to   = _epoch_to_iso8601(item.get("validTimeTo")),
+            source         = "aviation_weather",
+        ))
+    return notams
+
+
+def _parse_aviationweather_gairmet_response(items: object) -> List[Notam]:
+    """Parse AviationWeather G-AIRMET JSON into Notam objects."""
+    if not isinstance(items, list):
+        return []
+
+    notams: List[Notam] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        region = _coords_to_region(item.get("coords"))
+        if region is None:
+            continue
+
+        center_lat, center_lon, radius_km = region
+        tag = str(item.get("tag") or item.get("product") or "UNKNOWN")
+        description = str(item.get("due_to") or item.get("hazard") or "G-AIRMET")
+        notams.append(Notam(
+            notam_id       = f"G-AIRMET-{tag}",
+            lat            = center_lat,
+            lon            = center_lon,
+            radius_km      = radius_km,
+            severity       = _gairmet_to_severity(item),
+            description    = description[:200],
+            effective_from = str(item.get("validTime") or "") or None,
+            effective_to   = _epoch_to_iso8601(item.get("expireTime")),
+            source         = "aviation_weather",
+        ))
+    return notams
 
 
 def _parse_faa_response(data: dict) -> List[Notam]:
@@ -300,6 +430,38 @@ def _fetch_faa_notams() -> Optional[List[Notam]]:
 
     except Exception:
         return None
+
+
+def _fetch_aviationweather_notams() -> Optional[List[Notam]]:
+    """
+    Fetch SIGMET and G-AIRMET advisories from AviationWeather's public API.
+
+    Returns None when both requests fail. Successful requests may still return
+    an empty list when there are no active advisories.
+    """
+    collected: List[Notam] = []
+    succeeded = False
+    endpoints = [
+        (_AVIATIONWEATHER_AIRSIGMET_URL, _parse_aviationweather_airsigmet_response),
+        (_AVIATIONWEATHER_GAIRMET_URL, _parse_aviationweather_gairmet_response),
+    ]
+
+    for url, parser in endpoints:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "military-activity-tracker/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=_AVIATIONWEATHER_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode())
+            collected.extend(parser(data))
+            succeeded = True
+        except Exception:
+            continue
+
+    if not succeeded:
+        return None
+    return collected
 
 
 def _load_fallback_notams() -> List[Notam]:
@@ -431,8 +593,9 @@ def fetch_notam_signals(
     1. Returns the module-level cache if already populated.
     2. Attempts a live fetch from the FAA NOTAM API (requires
        FAA_CLIENT_ID and FAA_CLIENT_SECRET env vars; 4 s timeout each).
-    3. Falls back to src/data/notams_fallback.json on any failure.
-    4. Falls back to _MOCK_NOTAMS if the JSON file is unavailable.
+    3. Falls back to AviationWeather SIGMET/G-AIRMET data.
+    4. Falls back to src/data/notams_fallback.json on any failure.
+    5. Falls back to _MOCK_NOTAMS if the JSON file is unavailable.
 
     The result is cached so that repeated no-arg calls within the same
     process incur only one network round-trip.
@@ -454,7 +617,9 @@ def fetch_notam_signals(
         return _SIGNAL_CACHE
 
     source_notams = _fetch_faa_notams()
-    if source_notams is None:
+    if not source_notams:
+        source_notams = _fetch_aviationweather_notams()
+    if not source_notams:
         source_notams = _load_fallback_notams()
     if not source_notams:
         source_notams = list(_MOCK_NOTAMS)

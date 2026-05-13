@@ -17,7 +17,26 @@
       "Bash(python -m pytest tests/ --tb=short -q)",
       "Bash(python -m pytest tests/test_calibration.py -x -q)",
       "Bash(awk ' *)",
-      "Bash(python -m pytest tests/test_classifier.py tests/test_calibration.py -q)"
+      "Bash(python -m pytest tests/test_classifier.py tests/test_calibration.py -q)",
+      "Bash(python -m pytest tests/test_external_features.py -v)",
+      "Bash(python -m pytest tests/test_external_features.py tests/test_classifier.py tests/test_calibration.py -q)",
+      "Bash(python -m pytest tests/test_notam_ingestion.py -v)",
+      "Bash(python -m pytest --tb=short -q)",
+      "Bash(python -m pytest tests/test_observability.py -v)",
+      "Bash(python query.py)",
+      "Bash(python -m pytest tests/test_external_classification.py -v)",
+      "Bash(python -m pytest tests/test_external_classification.py tests/test_external_features.py -v)",
+      "Bash(python -m pytest tests/test_external_features.py tests/test_external_classification.py -v)",
+      "Bash(pip install *)",
+      "Bash(pip3 install *)",
+      "Bash(python -m pip install git+https://github.com/ruvnet/ruflo.git)",
+      "Bash(python3 -m pip install git+https://github.com/ruvnet/ruflo.git)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(npm --version)",
+      "PowerShell(node --version)",
+      "PowerShell(npm --version)",
+      "PowerShell($env:PATH = \"C:\\\\Program Files\\\\nodejs;\" + $env:PATH; & \"C:\\\\Program Files\\\\nodejs\\\\npm.cmd\" install -g ruflo@latest 2>&1)"
     ]
   }
 }

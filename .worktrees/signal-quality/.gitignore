@@ -1,0 +1,11 @@
+# Ignore database files
+data/
+*.db
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Optional: OS junk
+.DS_Store
+Thumbs.db.worktrees/

@@ -1,5 +1,13 @@
 # CLAUDE.md — Execution Protocol
 
+## Canonical Workspace
+
+Treat this repository root as the authoritative codebase for all project work:
+
+`C:\Users\zachp\OneDrive\Documents\GitHub\military-activity-tracker`
+
+If similarly named copies exist elsewhere, do not use them unless explicitly requested.
+
 ## Purpose
 
 Real-time aircraft activity classification using:

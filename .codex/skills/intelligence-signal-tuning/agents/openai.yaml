@@ -1,0 +1,4 @@
+interface:
+  display_name: "Signal Tuning"
+  short_description: "Tune classifier and external signal logic"
+  default_prompt: "Use $intelligence-signal-tuning to adjust intelligence scoring or external signal behavior safely."

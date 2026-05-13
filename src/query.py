@@ -2,6 +2,13 @@ import sqlite3
 import time
 from pathlib import Path
 
+from core.db import (
+    _ensure_aircraft_position_columns,
+    _ensure_aircraft_track_type,
+    _ensure_monitoring_tables,
+    _seed_theaters,
+    resolve_db_path,
+)
 from detection.clusters import (
     coordinated_activity,
     detect_new_entries,
@@ -12,10 +19,7 @@ from detection.changes import detect_activity_changes, detect_linked_regions
 from detection.movements import detect_movements
 from detection.staging import detect_staging_and_projection
 from intelligence.classifier import build_features, classify_regions
-from intelligence.notam_ingestion import fetch_notam_signals
-from intelligence.maritime_ingestion import fetch_maritime_signals
-from intelligence.satellite_ingestion import fetch_satellite_signals
-from intelligence.ais_ingestion import fetch_ais_signals
+from intelligence.source_governance import collect_operational_external_signals
 
 
 # ---------------------------------------------------------------------------
@@ -273,23 +277,16 @@ def _print_external_summary(summary):
 # ----------------------------
 
 def _migrate(conn):
-    """Ensure lat_bin / lon_bin columns and the composite index exist.
+    """Ensure the monitoring-era schema exists on the active database.
 
-    Safe to call on every startup: ADD COLUMN is no-op if the column already
-    exists (caught), and CREATE INDEX IF NOT EXISTS is always idempotent.
+    Safe to call on every startup: column adds are caught, tables are
+    idempotent, and the theater seed upserts.
     """
     cur = conn.cursor()
-    for col in ("lat_bin", "lon_bin"):
-        try:
-            cur.execute(f"ALTER TABLE aircraft_positions ADD COLUMN {col} REAL")
-        except sqlite3.OperationalError:
-            pass  # column already present
-    cur.execute("""
-        UPDATE aircraft_positions
-        SET lat_bin = ROUND(lat, 1),
-            lon_bin = ROUND(lon, 1)
-        WHERE lat_bin IS NULL
-    """)
+    _ensure_aircraft_position_columns(cur)
+    _ensure_aircraft_track_type(cur)
+    _ensure_monitoring_tables(cur)
+    _seed_theaters(cur)
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_time_bins
         ON aircraft_positions (timestamp, lat_bin, lon_bin)
@@ -299,7 +296,7 @@ def _migrate(conn):
 
 @timed
 def main():
-    db_path = Path(__file__).resolve().parent / "data" / "aircraft.db"
+    db_path = resolve_db_path()
     conn = sqlite3.connect(db_path)
     _migrate(conn)
     cursor = conn.cursor()
@@ -338,16 +335,9 @@ def main():
     # Skipped entirely when ENABLE_EXTERNAL_SIGNALS is False so the pipeline
     # behaves identically to pre-external-signal behaviour.
     if ENABLE_EXTERNAL_SIGNALS:
-        _notam_signals     = fetch_notam_signals()
-        _maritime_signals  = fetch_maritime_signals()
-        _satellite_signals = fetch_satellite_signals()
-        _ais_signals       = fetch_ais_signals()
+        _external_signals, _source_reports = collect_operational_external_signals(db_path=db_path)
     else:
-        _notam_signals     = []
-        _maritime_signals  = []
-        _satellite_signals = []
-        _ais_signals       = []
-    _external_signals = _notam_signals + _maritime_signals + _satellite_signals + _ais_signals
+        _external_signals = []
 
     # Intelligence classification
     features = build_features(

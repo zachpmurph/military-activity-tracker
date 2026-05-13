@@ -254,6 +254,7 @@ def _builtin_signals() -> List[ExternalSignal]:
 def fetch_ais_signals(
     bounding_boxes: Optional[List[List[List[float]]]] = None,
     collect_seconds: int = _COLLECT_SECONDS,
+    allow_fallback: bool = True,
 ) -> List[ExternalSignal]:
     """
     Return MARITIME ExternalSignal objects from live AIS vessel positions.
@@ -277,16 +278,18 @@ def fetch_ais_signals(
     All intensities are guaranteed to be in [0, 1].
     """
     global _SIGNAL_CACHE
-    if _SIGNAL_CACHE is not None:
+    if allow_fallback and _SIGNAL_CACHE is not None:
         return _SIGNAL_CACHE
 
     boxes = bounding_boxes if bounding_boxes is not None else _DEFAULT_BOUNDING_BOXES
 
     signals = _fetch_ais_live(boxes, collect_seconds)
-    if signals is None:
+    if signals is None and allow_fallback:
         signals = _load_fallback_signals()
-    if not signals:
+    if not signals and allow_fallback:
         signals = _builtin_signals()
 
-    _SIGNAL_CACHE = signals
-    return _SIGNAL_CACHE
+    if allow_fallback:
+        _SIGNAL_CACHE = signals
+        return _SIGNAL_CACHE
+    return signals or []

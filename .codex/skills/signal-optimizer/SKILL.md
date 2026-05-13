@@ -1,32 +1,27 @@
 ---
 name: signal-filter-optimizer
-description: Improve filtering and scoring of aircraft to reduce noise and highlight meaningful signals.
+description: Improve filtering, scoring, and noise suppression for aircraft, regions, and external-signal effects in this repository. Use when outputs are too noisy, civilian traffic dominates, or work touches src/scoring/scoring.py, src/intelligence/*, src/query.py, or tests that validate scoring behavior.
 ---
 
 # Signal Filter Optimizer
 
-Use this skill when:
-- too many civilian aircraft appear
-- signal-to-noise ratio is poor
-- classification or scoring needs tuning
+Use this skill when the system is technically working but surfacing the wrong things.
 
 ## Workflow
 
-1. Analyze current output:
-   - most_suspicious
-   - persistent_aircraft
-2. Identify noise sources:
-   - civilian airlines
-   - private jets
-3. Evaluate classification logic
-4. Adjust:
-   - type filters
-   - score thresholds
-   - behavior weighting
-5. Suggest updated rules
+1. Identify the noisy layer:
+   - aircraft scoring
+   - region ranking
+   - movement filtering
+   - external-signal boosting
+2. Inspect the current thresholds and weights before changing them.
+3. Separate civilian-noise suppression from military-signal boosting.
+4. Keep external signals additive-only and consistent with `CLAUDE.md`.
+5. Prefer small weight or threshold changes over structural rewrites.
+6. Add or update regression tests that prove the intended ranking order.
 
 ## Output
 
-- List of filtering issues
-- Improved scoring logic
-- Updated code snippets
+- Which inputs are creating noise
+- Which threshold or weight should move
+- The smallest scoring or filter patch that improves ranking without breaking invariants

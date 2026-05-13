@@ -1,0 +1,8 @@
+Given a list of detected regions and activity changes:
+
+- Remove noise and duplicates
+- Identify the top 5 most significant regions
+- Prioritize military involvement and rapid growth
+- Return only region coordinates + reason + severity
+
+Keep output under 150 words.

@@ -30,9 +30,11 @@ import unittest
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Optional
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import intelligence.notam_ingestion as notam_ingestion
 from intelligence.notam_ingestion import (
     Notam,
     NotamSeverity,
@@ -42,6 +44,8 @@ from intelligence.notam_ingestion import (
     _KM_PER_DEG,
     expand_notam_to_signals,
     fetch_notam_signals,
+    _parse_aviationweather_airsigmet_response,
+    _parse_aviationweather_gairmet_response,
     _parse_faa_response,
     _load_fallback_notams,
 )
@@ -62,6 +66,7 @@ def _make_notam(
     description: str = "Test NOTAM",
     effective_from: Optional[str] = None,
     effective_to: Optional[str] = None,
+    source: str = "NOTAM",
 ) -> Notam:
     return Notam(
         notam_id=notam_id,
@@ -72,6 +77,7 @@ def _make_notam(
         description=description,
         effective_from=effective_from,
         effective_to=effective_to,
+        source=source,
     )
 
 
@@ -236,15 +242,17 @@ class ExpandNotamToSignalsTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class FetchNotamSignalsTests(unittest.TestCase):
+    def tearDown(self):
+        notam_ingestion._SIGNAL_CACHE = None
 
     def test_default_returns_nonempty_list(self):
         signals = fetch_notam_signals()
         self.assertGreater(len(signals), 0)
 
     def test_default_signal_count_at_least_mock_notam_count(self):
-        """Grid expansion means larger NOTAMs produce multiple signals."""
+        """Default fetch should yield at least one live or fallback signal."""
         signals = fetch_notam_signals()
-        self.assertGreaterEqual(len(signals), len(_MOCK_NOTAMS))
+        self.assertGreater(len(signals), 0)
 
     def test_all_default_signals_are_no_fly(self):
         signals = fetch_notam_signals()
@@ -281,10 +289,10 @@ class FetchNotamSignalsTests(unittest.TestCase):
         for sig in signals:
             self.assertIsInstance(sig, ExternalSignal)
 
-    def test_metadata_source_all_notam(self):
+    def test_metadata_source_all_known_source(self):
         signals = fetch_notam_signals()
         for sig in signals:
-            self.assertEqual(sig.metadata.get("source"), "NOTAM")
+            self.assertIn(sig.metadata.get("source"), {"NOTAM", "real_notam", "aviation_weather"})
 
     def test_intensity_ordering_preserved_across_severities(self):
         notams = [
@@ -296,6 +304,32 @@ class FetchNotamSignalsTests(unittest.TestCase):
         signals = fetch_notam_signals(notams)
         intensities = [s.intensity for s in signals]
         self.assertEqual(intensities, sorted(intensities))
+
+    def test_live_fetch_uses_aviationweather_before_static_fallback(self):
+        weather_notam = _make_notam(
+            notam_id="WX-1",
+            lat=40.0,
+            lon=-105.0,
+            severity=NotamSeverity.RESTRICTED,
+            description="SIGMET turbulence",
+            source="aviation_weather",
+        )
+        fallback_notam = _make_notam(
+            notam_id="FB-1",
+            lat=10.0,
+            lon=20.0,
+            severity=NotamSeverity.ADVISORY,
+        )
+
+        notam_ingestion._SIGNAL_CACHE = None
+        with patch.object(notam_ingestion, "_fetch_faa_notams", return_value=None):
+            with patch.object(notam_ingestion, "_fetch_aviationweather_notams", return_value=[weather_notam]):
+                with patch.object(notam_ingestion, "_load_fallback_notams", return_value=[fallback_notam]):
+                    signals = fetch_notam_signals()
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].metadata["id"], "WX-1")
+        self.assertEqual(signals[0].metadata["source"], "aviation_weather")
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +642,56 @@ class ParseFaaResponseTests(unittest.TestCase):
         self.assertIn("id", sig.metadata)
         self.assertIn("radius_km", sig.metadata)
         self.assertIn("severity", sig.metadata)
+
+
+class ParseAviationWeatherResponseTests(unittest.TestCase):
+    def test_airsigmet_convective_maps_to_prohibited_notam(self):
+        data = [{
+            "seriesId": "55E",
+            "airSigmetType": "SIGMET",
+            "hazard": "CONVECTIVE",
+            "rawAirSigmet": "CONVECTIVE SIGMET 55E",
+            "validTimeFrom": 1778694900,
+            "validTimeTo": 1778702100,
+            "coords": [
+                {"lat": 31.0, "lon": -76.0},
+                {"lat": 30.0, "lon": -77.0},
+                {"lat": 29.0, "lon": -78.0},
+                {"lat": 31.0, "lon": -76.0},
+            ],
+        }]
+
+        result = _parse_aviationweather_airsigmet_response(data)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].notam_id, "SIGMET-55E")
+        self.assertEqual(result[0].severity, NotamSeverity.PROHIBITED)
+        self.assertEqual(result[0].source, "aviation_weather")
+        self.assertGreater(result[0].radius_km, 0.0)
+
+    def test_gairmet_ifr_maps_to_warning_notam(self):
+        data = [{
+            "tag": "5E",
+            "hazard": "IFR",
+            "product": "SIERRA",
+            "due_to": "CIG BLW 010 VIS BLW 3SM PCPN BR",
+            "validTime": "2026-05-13T18:00:00.000Z",
+            "expireTime": 1778706000,
+            "coords": [
+                {"lat": "45.31", "lon": "-70.72"},
+                {"lat": "44.51", "lon": "-70.07"},
+                {"lat": "43.81", "lon": "-70.08"},
+                {"lat": "45.31", "lon": "-70.72"},
+            ],
+        }]
+
+        result = _parse_aviationweather_gairmet_response(data)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].notam_id, "G-AIRMET-5E")
+        self.assertEqual(result[0].severity, NotamSeverity.WARNING)
+        self.assertEqual(result[0].source, "aviation_weather")
+        self.assertGreater(result[0].radius_km, 0.0)
 
 
 # ---------------------------------------------------------------------------

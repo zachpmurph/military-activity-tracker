@@ -47,9 +47,9 @@ class RunOnceTests(unittest.TestCase):
 
     @patch("intelligence.runner.classify_regions", return_value=[])
     @patch("intelligence.runner.build_features",    return_value=[])
-    @patch("intelligence.runner.fetch_satellite_signals", return_value=[])
-    @patch("intelligence.runner.fetch_maritime_signals",  return_value=[])
-    @patch("intelligence.runner.fetch_notam_signals",     return_value=[])
+    @patch("intelligence.runner.export_monitoring_snapshot", return_value={})
+    @patch("intelligence.runner.persist_monitoring_state", return_value={"region_count": 0, "route_count": 0, "alert_count": 0})
+    @patch("intelligence.runner.collect_operational_external_signals", return_value=([], []))
     @patch("intelligence.runner.detect_activity_changes", return_value=[])
     @patch("intelligence.runner.detect_spikes",           return_value=[])
     @patch("intelligence.runner.coordinated_activity",    return_value=[])
@@ -68,9 +68,9 @@ class RunOnceTests(unittest.TestCase):
 
     @patch("intelligence.runner.classify_regions", return_value=[])
     @patch("intelligence.runner.build_features",    return_value=[])
-    @patch("intelligence.runner.fetch_satellite_signals", return_value=[])
-    @patch("intelligence.runner.fetch_maritime_signals",  return_value=[])
-    @patch("intelligence.runner.fetch_notam_signals",     return_value=[])
+    @patch("intelligence.runner.export_monitoring_snapshot", return_value={})
+    @patch("intelligence.runner.persist_monitoring_state", return_value={"region_count": 0, "route_count": 0, "alert_count": 0})
+    @patch("intelligence.runner.collect_operational_external_signals", return_value=([], []))
     @patch("intelligence.runner.detect_activity_changes", return_value=[])
     @patch("intelligence.runner.detect_spikes",           return_value=[])
     @patch("intelligence.runner.coordinated_activity",    return_value=[])
@@ -95,9 +95,9 @@ class RunOnceTests(unittest.TestCase):
 
     @patch("intelligence.runner.classify_regions", return_value=[])
     @patch("intelligence.runner.build_features",    return_value=[])
-    @patch("intelligence.runner.fetch_satellite_signals", return_value=[])
-    @patch("intelligence.runner.fetch_maritime_signals",  return_value=[])
-    @patch("intelligence.runner.fetch_notam_signals",     return_value=[])
+    @patch("intelligence.runner.export_monitoring_snapshot", return_value={})
+    @patch("intelligence.runner.persist_monitoring_state", return_value={"region_count": 0, "route_count": 0, "alert_count": 0})
+    @patch("intelligence.runner.collect_operational_external_signals", return_value=([], []))
     @patch("intelligence.runner.detect_activity_changes", return_value=[])
     @patch("intelligence.runner.detect_spikes",           return_value=[])
     @patch("intelligence.runner.coordinated_activity",    return_value=[])
@@ -105,26 +105,21 @@ class RunOnceTests(unittest.TestCase):
     @patch("intelligence.runner.detect_movements",        return_value=[])
     @patch("intelligence.runner.detect_new_entries",      return_value=[])
     @patch("intelligence.runner.recurring_regions",       return_value=[])
-    def test_run_once_calls_all_signal_fetchers(self, *_detection,
-                                                 mock_changes=None, mock_spikes=None,
-                                                 mock_coord=None, mock_staging=None,
-                                                 mock_movements=None, mock_new=None,
-                                                 mock_recurring=None):
-        # Re-patch cleanly so we can inspect signal mocks
-        with patch("intelligence.runner.fetch_notam_signals", return_value=[]) as mn, \
-             patch("intelligence.runner.fetch_maritime_signals", return_value=[]) as mm, \
-             patch("intelligence.runner.fetch_satellite_signals", return_value=[]) as ms:
+    def test_run_once_calls_operational_source_collector(self, *_detection,
+                                                         mock_changes=None, mock_spikes=None,
+                                                         mock_coord=None, mock_staging=None,
+                                                         mock_movements=None, mock_new=None,
+                                                         mock_recurring=None):
+        with patch("intelligence.runner.collect_operational_external_signals", return_value=([], [])) as collector:
             run_once(_empty_cursor(), Path("/fake/aircraft.db"))
             if runner_mod.ENABLE_EXTERNAL_SIGNALS:
-                mn.assert_called_once()
-                mm.assert_called_once()
-                ms.assert_called_once()
+                collector.assert_called_once_with(db_path=Path("/fake/aircraft.db"))
 
     @patch("intelligence.runner.classify_regions", return_value=[])
     @patch("intelligence.runner.build_features",    return_value=[])
-    @patch("intelligence.runner.fetch_satellite_signals", return_value=[])
-    @patch("intelligence.runner.fetch_maritime_signals",  return_value=[])
-    @patch("intelligence.runner.fetch_notam_signals",     return_value=[])
+    @patch("intelligence.runner.export_monitoring_snapshot", return_value={})
+    @patch("intelligence.runner.persist_monitoring_state", return_value={"region_count": 0, "route_count": 0, "alert_count": 0})
+    @patch("intelligence.runner.collect_operational_external_signals", return_value=([], []))
     @patch("intelligence.runner.detect_activity_changes", return_value=[])
     @patch("intelligence.runner.detect_spikes",           return_value=[])
     @patch("intelligence.runner.coordinated_activity",    return_value=[])
@@ -132,19 +127,17 @@ class RunOnceTests(unittest.TestCase):
     @patch("intelligence.runner.detect_movements",        return_value=[])
     @patch("intelligence.runner.detect_new_entries",      return_value=[])
     @patch("intelligence.runner.recurring_regions",       return_value=[])
-    def test_run_once_passes_db_path_to_satellite(self, *_mocks):
-        """fetch_satellite_signals receives the db_path argument."""
+    def test_run_once_exports_monitoring_snapshot(self, *_mocks):
         db_path = Path("/my/aircraft.db")
-        with patch("intelligence.runner.fetch_satellite_signals", return_value=[]) as ms:
+        with patch("intelligence.runner.export_monitoring_snapshot", return_value={}) as exporter:
             run_once(_empty_cursor(), db_path)
-            if runner_mod.ENABLE_EXTERNAL_SIGNALS:
-                ms.assert_called_once_with(db_path)
+            exporter.assert_called_once_with(unittest.mock.ANY, db_path.parent / "exports", unittest.mock.ANY)
 
     @patch("intelligence.runner.classify_regions", return_value=[])
     @patch("intelligence.runner.build_features",    return_value=[])
-    @patch("intelligence.runner.fetch_satellite_signals", return_value=[])
-    @patch("intelligence.runner.fetch_maritime_signals",  return_value=[])
-    @patch("intelligence.runner.fetch_notam_signals",     return_value=[])
+    @patch("intelligence.runner.export_monitoring_snapshot", return_value={})
+    @patch("intelligence.runner.persist_monitoring_state", return_value={"region_count": 0, "route_count": 0, "alert_count": 0})
+    @patch("intelligence.runner.collect_operational_external_signals", return_value=([], []))
     @patch("intelligence.runner.detect_activity_changes", return_value=None)
     @patch("intelligence.runner.detect_spikes",           return_value=[])
     @patch("intelligence.runner.coordinated_activity",    return_value=[])
@@ -158,6 +151,28 @@ class RunOnceTests(unittest.TestCase):
             run_once(_empty_cursor(), Path("/fake/aircraft.db"))
         except Exception as exc:
             self.fail(f"run_once raised with None activity_changes: {exc!r}")
+
+
+    @patch("intelligence.runner.classify_regions", return_value=[])
+    @patch("intelligence.runner.build_features", return_value=[])
+    @patch("intelligence.runner.export_monitoring_snapshot", return_value={})
+    @patch("intelligence.runner.collect_operational_external_signals", return_value=([], []))
+    @patch("intelligence.runner.detect_activity_changes", return_value=[])
+    @patch("intelligence.runner.detect_spikes", return_value=[])
+    @patch("intelligence.runner.coordinated_activity", return_value=[])
+    @patch("intelligence.runner.detect_staging_and_projection", return_value=([], []))
+    @patch("intelligence.runner.detect_movements", return_value=[("movement",)])
+    @patch("intelligence.runner.detect_new_entries", return_value=[])
+    @patch("intelligence.runner.recurring_regions", return_value=[])
+    def test_run_once_persists_flow_routes_instead_of_short_window_movements(self, *_mocks):
+        flow_routes = [(25.0, 45.0, 27.0, 47.0, 4, 2, 1.6, 9.0)]
+        with patch("intelligence.runner.flow_routes_last_6h", return_value=flow_routes, create=True):
+            with patch(
+                "intelligence.runner.persist_monitoring_state",
+                return_value={"region_count": 0, "route_count": 1, "alert_count": 1},
+            ) as backend:
+                run_once(_empty_cursor(), Path("/fake/aircraft.db"))
+                self.assertEqual(backend.call_args.kwargs["route_rows"], flow_routes)
 
 
 # ---------------------------------------------------------------------------
