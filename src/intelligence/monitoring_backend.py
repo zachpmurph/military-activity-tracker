@@ -1594,6 +1594,60 @@ def export_monitoring_snapshot(cursor, output_dir: Path, snapshot_time: float) -
             else "No degraded live sources are currently constraining the operator view"
         ),
     }
+    civilian_heavy_visible_region_count = sum(
+        1
+        for region in regions
+        if region["visible"] and region["evidence_summary"].get("region_type") == "CIVILIAN_HEAVY"
+    )
+    visible_route_experimental_only_count = sum(
+        1
+        for route in routes
+        if route["visible"] and route["live_source_count"] == 0 and route["experimental_source_count"] > 0
+    )
+    degraded_primary_live_source_count = sum(
+        1
+        for source in degraded_sources
+        if source["source_tier"] == "primary_live"
+    )
+    critical_visible_alert_count_under_degradation = (
+        sum(1 for alert in top_visible_alerts if alert["severity"] == "CRITICAL")
+        if degraded_primary_live_source_count > 0
+        else 0
+    )
+    recommended_actions = []
+    if degraded_primary_live_source_count > 0:
+        recommended_actions.append("restore_primary_live_sources")
+    if civilian_heavy_visible_region_count > 0:
+        recommended_actions.append("review_civilian_noise_thresholds")
+    if visible_route_experimental_only_count > 0:
+        recommended_actions.append("review_experimental_route_weighting")
+    if critical_visible_alert_count_under_degradation > 0:
+        recommended_actions.append("validate_critical_alerts_under_degradation")
+    validation_report = {
+        "generated_at": snapshot_time,
+        "metrics": {
+            "civilian_heavy_visible_region_count": civilian_heavy_visible_region_count,
+            "visible_route_experimental_only_count": visible_route_experimental_only_count,
+            "degraded_primary_live_source_count": degraded_primary_live_source_count,
+            "critical_visible_alert_count_under_degradation": critical_visible_alert_count_under_degradation,
+        },
+        "checks": {
+            "civilian_heavy_visible_regions": "warn" if civilian_heavy_visible_region_count > 0 else "pass",
+            "experimental_only_visible_routes": "warn" if visible_route_experimental_only_count > 0 else "pass",
+            "degraded_primary_live_sources": "warn" if degraded_primary_live_source_count > 0 else "pass",
+            "critical_alerts_under_degradation": "warn" if critical_visible_alert_count_under_degradation > 0 else "pass",
+        },
+        "recommended_actions": recommended_actions,
+        "summary": {
+            "headline": (
+                f"Validation warning: {civilian_heavy_visible_region_count} civilian-heavy visible regions and "
+                f"{degraded_primary_live_source_count} degraded primary-live sources; "
+                f"top issue: {degraded_sources[0]['last_error_reason']}"
+                if degraded_sources
+                else f"Validation pass: {civilian_heavy_visible_region_count} civilian-heavy visible regions and no degraded primary-live sources"
+            ),
+        },
+    }
 
     top_theater_id = top_theaters[0]["theater_id"] if top_theaters else "global"
     summary_headline = (
@@ -1631,6 +1685,7 @@ def export_monitoring_snapshot(cursor, output_dir: Path, snapshot_time: float) -
     alerts_path = output_dir / "latest_alerts.json"
     priority_brief_path = output_dir / "latest_priority_brief.json"
     operator_views_path = output_dir / "latest_operator_views.json"
+    validation_report_path = output_dir / "latest_validation_report.json"
     theaters_path.write_text(json.dumps({"generated_at": snapshot_time, "theaters": theaters}, indent=2), encoding="utf-8")
     regions_path.write_text(json.dumps({"generated_at": snapshot_time, "regions": regions}, indent=2), encoding="utf-8")
     routes_path.write_text(json.dumps({"generated_at": snapshot_time, "routes": routes}, indent=2), encoding="utf-8")
@@ -1642,6 +1697,7 @@ def export_monitoring_snapshot(cursor, output_dir: Path, snapshot_time: float) -
     alerts_path.write_text(json.dumps({"generated_at": snapshot_time, "alerts": alerts}, indent=2), encoding="utf-8")
     priority_brief_path.write_text(json.dumps(priority_brief, indent=2), encoding="utf-8")
     operator_views_path.write_text(json.dumps(operator_views, indent=2), encoding="utf-8")
+    validation_report_path.write_text(json.dumps(validation_report, indent=2), encoding="utf-8")
     return {
         "theaters": str(theaters_path),
         "regions": str(regions_path),
@@ -1651,4 +1707,5 @@ def export_monitoring_snapshot(cursor, output_dir: Path, snapshot_time: float) -
         "alerts": str(alerts_path),
         "priority_brief": str(priority_brief_path),
         "operator_views": str(operator_views_path),
+        "validation_report": str(validation_report_path),
     }

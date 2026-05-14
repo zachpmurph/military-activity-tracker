@@ -10,6 +10,7 @@ pipeline, without requiring manual invocation of query.py.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 import time
@@ -40,6 +41,18 @@ from query import (
 
 
 INTEL_INTERVAL_SEC: int = 300
+
+
+def _read_json_export(path_str: str | None):
+    if not path_str:
+        return None
+    path = Path(path_str)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def run_once(cursor: sqlite3.Cursor, db_path: Path) -> None:
@@ -98,6 +111,18 @@ def run_once(cursor: sqlite3.Cursor, db_path: Path) -> None:
             "exports": export_paths,
         }
     )
+
+    validation_payload = _read_json_export(export_paths.get("validation_report"))
+    if validation_payload:
+        print("\n--- VALIDATION SUMMARY ---")
+        print(validation_payload.get("summary", {}).get("headline", "Validation report available"))
+
+    operator_views_payload = _read_json_export(export_paths.get("operator_views"))
+    if operator_views_payload:
+        top_theaters = operator_views_payload.get("top_rising_theaters", [])
+        if top_theaters:
+            print("\n--- OPERATOR VIEW SUMMARY ---")
+            print(f"top_rising_theater: {top_theaters[0].get('theater_id', 'unknown')}")
 
 
 def main() -> None:

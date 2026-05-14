@@ -120,6 +120,27 @@ class RankRegionsTests(unittest.TestCase):
         self.assertNotIn("(40.0, -75.0, 3.0, 2, 0, 0, 0)", lines)
         self.assertNotIn("(41.0, -76.0, 2.1, 1, 0, 1, 0)", lines)
 
+    def test_rank_regions_uses_precomputed_rows_without_recalling_detectors(self):
+        coordinated_rows = [(34.12, -117.24, 4, 2)]
+        spike_rows = [(34.08, -117.18, 6, 4)]
+        recurring_rows = [(34.1, -117.2, 4, 9, 5)]
+
+        output = io.StringIO()
+        with patch.object(query, "coordinated_activity", side_effect=AssertionError("should not be called"), create=True):
+            with patch.object(query, "detect_spikes", side_effect=AssertionError("should not be called"), create=True):
+                with patch.object(query, "recurring_regions", side_effect=AssertionError("should not be called")):
+                    with redirect_stdout(output):
+                        query.rank_regions(
+                            None,
+                            coordinated_rows=coordinated_rows,
+                            spike_rows=spike_rows,
+                            recurring_rows=recurring_rows,
+                        )
+
+        lines = [line.strip() for line in output.getvalue().splitlines() if line.strip()]
+        self.assertEqual(lines[0], "--- PRIORITY REGIONS ---")
+        self.assertIn("(34.1, -117.2, 34.8, 9, 5, 1, 4)", lines)
+
 
 class DetectNewEntriesTests(RecurringRegionsTests):
     def test_detect_new_entries_finds_novel_aircraft_by_region(self):
@@ -250,6 +271,8 @@ class DetectStagingAndProjectionTests(RecurringRegionsTests):
             ("t4", now - 18_500, now - 140, 33.11, -116.11, 35.12, -118.14, 2.3, "UNKNOWN"),
             ("t5", now - 18_000, now - 160, 33.12, -116.10, 35.14, -118.11, 2.2, "UK_CARGO"),
             ("t6", now - 17_500, now - 180, 33.10, -116.12, 37.11, -120.11, 5.6, "UNKNOWN"),
+            ("same1", now - 17_000, now - 110, 42.01, -87.91, 42.04, -87.94, 0.9, "UNKNOWN"),
+            ("same2", now - 16_500, now - 130, 42.02, -87.92, 42.03, -87.93, 0.8, "UNKNOWN"),
             ("old1", now - 30_000, now - 25_000, 34.11, -117.11, 35.11, -118.11, 1.4, "US_CARGO"),
             ("small1", now - 5_000, now - 100, 34.11, -117.11, 34.31, -117.11, 0.4, "US_CARGO"),
         ]
@@ -274,6 +297,7 @@ class DetectStagingAndProjectionTests(RecurringRegionsTests):
         self.assertIn("--- Major Flow Routes (Last 6 Hours) ---", lines)
         self.assertIn("(34.1, -117.1, 35.1, -118.1, 2, 2, 7.0)", lines)
         self.assertIn("(33.1, -116.1, 35.1, -118.1, 2, 1, 4.5)", lines)
+        self.assertNotIn("(42.0, -87.9, 42.0, -87.9, 2, 0, 2.0)", lines)
         self.assertNotIn("(34.1, -117.1, 34.3, -117.1, 1, 1, 3.5)", lines)
 
 
@@ -321,6 +345,41 @@ class DetectActivityChangesTests(RecurringRegionsTests):
         self.assertIn("(35.0, -120.0, 25.7, 6, 6, 2.2, 'SURGE,MILITARY_BUILDUP,ESCALATION', 'HIGH', ['MILITARY_BUILDUP', 'PERSISTENT_ACTIVITY', 'HIGH_SCORE'], 'MEDIUM', '5af8d654', 0.0, 54.5, 45.5, 54.5, 'MILITARY_HEAVY')", lines)
         # Small UNKNOWN-only region is filtered (score 2.0 < threshold 15)
         self.assertFalse(any("42." in l for l in lines), "Small UNKNOWN region must be filtered out")
+
+
+class QueryMainCachingTests(unittest.TestCase):
+    def test_main_runs_cached_detectors_once(self):
+        fake_conn = unittest.mock.MagicMock()
+        fake_cursor = unittest.mock.MagicMock()
+        fake_conn.cursor.return_value = fake_cursor
+        fake_cursor.fetchall.return_value = []
+
+        with patch.object(query, "resolve_db_path", return_value=Path("/fake/aircraft.db")):
+            with patch.object(query.sqlite3, "connect", return_value=fake_conn):
+                with patch.object(query, "_migrate"):
+                    with patch.object(query, "most_suspicious", return_value=[]):
+                        with patch.object(query, "recent_activity", return_value=[]):
+                            with patch.object(query, "loitering", return_value=[]):
+                                with patch.object(query, "persistent_aircraft"):
+                                    with patch.object(query, "military_cluster"):
+                                        with patch.object(query, "recurring_regions", return_value=[] ) as recurring:
+                                            with patch.object(query, "coordinated_activity", return_value=[] ) as coordinated:
+                                                with patch.object(query, "detect_spikes", return_value=[] ) as spikes:
+                                                    with patch.object(query, "rank_regions"):
+                                                        with patch.object(query, "detect_new_entries", return_value=[]):
+                                                            with patch.object(query, "detect_movements", return_value=[]):
+                                                                with patch.object(query, "detect_staging_and_projection", return_value=([], [])):
+                                                                    with patch.object(query, "detect_activity_changes", return_value=[]):
+                                                                        with patch.object(query, "detect_linked_regions"):
+                                                                            with patch.object(query, "collect_operational_external_signals", return_value=([], [])):
+                                                                                with patch.object(query, "build_features", return_value=[]):
+                                                                                    with patch.object(query, "classify_regions", return_value=[]):
+                                                                                        with patch.object(query, "_print_external_summary"):
+                                                                                            query.main()
+
+        recurring.assert_called_once_with(fake_cursor)
+        coordinated.assert_called_once_with(fake_cursor)
+        spikes.assert_called_once_with(fake_cursor)
 
 
 class DetectActivityChangesCapsTests(RecurringRegionsTests):
@@ -534,6 +593,25 @@ class EdgeCaseTests(RecurringRegionsTests):
         e_idx = lines.index(e_lines[0])
         self.assertLess(a_idx, d_idx, "A must appear before D")
         self.assertLess(d_idx, e_idx, "D must appear before E on equal score (stable sort)")
+
+    def test_civilian_heavy_hub_surge_does_not_promote_over_military_region(self):
+        now = 500_000
+
+        for i in range(119):
+            self.insert_position(f"hub-u-{i}", 64.01, 21.01, now - 300, "UNKNOWN", 8)
+        self.insert_position("hub-m-0", 64.01, 21.01, now - 300, "US_CARGO", 8)
+
+        for i in range(7):
+            self.insert_position(f"mil-u-{i}", 65.01, 22.01, now - 300, "UNKNOWN", 5)
+        for i in range(5):
+            self.insert_position(f"mil-m-{i}", 65.01, 22.01, now - 300, "US_CARGO", 5)
+
+        self.connection.commit()
+
+        lines = self._run(now)
+
+        self.assertFalse(any("64." in l and "'CIVILIAN_HEAVY'" in l for l in lines))
+        self.assertTrue(any("65." in l and "'MILITARY_HEAVY'" in l for l in lines))
 
     def test_threshold_boundary_inclusion_exclusion(self):
         # Below (12.5):  prior 6 UNKNOWN score=0, recent 6 UNKNOWN score=7

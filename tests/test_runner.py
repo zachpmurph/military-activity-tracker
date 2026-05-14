@@ -11,6 +11,8 @@ import sys
 import time
 import types
 import unittest
+import tempfile
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
@@ -173,6 +175,48 @@ class RunOnceTests(unittest.TestCase):
             ) as backend:
                 run_once(_empty_cursor(), Path("/fake/aircraft.db"))
                 self.assertEqual(backend.call_args.kwargs["route_rows"], flow_routes)
+
+    @patch("intelligence.runner.classify_regions", return_value=[])
+    @patch("intelligence.runner.build_features", return_value=[])
+    @patch("intelligence.runner.persist_monitoring_state", return_value={"region_count": 0, "route_count": 0, "alert_count": 0})
+    @patch("intelligence.runner.collect_operational_external_signals", return_value=([], []))
+    @patch("intelligence.runner.detect_activity_changes", return_value=[])
+    @patch("intelligence.runner.detect_spikes", return_value=[])
+    @patch("intelligence.runner.coordinated_activity", return_value=[])
+    @patch("intelligence.runner.detect_staging_and_projection", return_value=([], []))
+    @patch("intelligence.runner.detect_movements", return_value=[])
+    @patch("intelligence.runner.detect_new_entries", return_value=[])
+    @patch("intelligence.runner.recurring_regions", return_value=[])
+    def test_run_once_prints_validation_headline_when_export_exists(self, *_mocks):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            validation_path = Path(tmpdir) / "latest_validation_report.json"
+            operator_views_path = Path(tmpdir) / "latest_operator_views.json"
+            validation_path.write_text(
+                json.dumps({"summary": {"headline": "Validation warning: test headline"}}),
+                encoding="utf-8",
+            )
+            operator_views_path.write_text(
+                json.dumps({"top_rising_theaters": [{"theater_id": "middle_east"}]}),
+                encoding="utf-8",
+            )
+            with patch(
+                "intelligence.runner.export_monitoring_snapshot",
+                return_value={
+                    "validation_report": str(validation_path),
+                    "operator_views": str(operator_views_path),
+                },
+            ):
+                with patch("builtins.print") as mock_print:
+                    run_once(_empty_cursor(), Path("/fake/aircraft.db"))
+
+            printed = "\n".join(
+                " ".join(str(arg) for arg in call.args)
+                for call in mock_print.call_args_list
+            )
+            self.assertIn("--- VALIDATION SUMMARY ---", printed)
+            self.assertIn("Validation warning: test headline", printed)
+            self.assertIn("--- OPERATOR VIEW SUMMARY ---", printed)
+            self.assertIn("middle_east", printed)
 
 
 # ---------------------------------------------------------------------------

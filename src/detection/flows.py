@@ -35,6 +35,7 @@ def flow_routes_last_6h(cursor, cutoff=None):
           AND max_distance >= 0.5
         GROUP BY origin_lat, origin_lon, dest_lat, dest_lon
         HAVING aircraft_count >= 2
+           AND (origin_lat != dest_lat OR origin_lon != dest_lon)
         ORDER BY flow_score DESC, aircraft_count DESC
         LIMIT 10;
         """,

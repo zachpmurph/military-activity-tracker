@@ -153,7 +153,7 @@ def military_cluster(cursor):
 # ----------------------------
 
 @timed
-def rank_regions(cursor):
+def rank_regions(cursor, coordinated_rows=None, spike_rows=None, recurring_rows=None):
     print("\n--- PRIORITY REGIONS ---")
 
     regions = {}
@@ -170,19 +170,23 @@ def rank_regions(cursor):
             }
         return regions[key]
 
-    for lat, lon, aircraft_count, military_count in coordinated_activity(cursor):
+    coordinated_rows = coordinated_rows if coordinated_rows is not None else coordinated_activity(cursor)
+    spike_rows = spike_rows if spike_rows is not None else detect_spikes(cursor)
+    recurring_rows = recurring_rows if recurring_rows is not None else recurring_regions(cursor)
+
+    for lat, lon, aircraft_count, military_count in coordinated_rows:
         region = get_region(lat, lon)
         region["aircraft_count"] = max(region["aircraft_count"], aircraft_count)
         region["military_count"] = max(region["military_count"], military_count)
         region["coordinated_flag"] = 1
 
-    for lat, lon, aircraft_count, military_count in detect_spikes(cursor):
+    for lat, lon, aircraft_count, military_count in spike_rows:
         region = get_region(lat, lon)
         region["aircraft_count"] = max(region["aircraft_count"], aircraft_count)
         region["military_count"] = max(region["military_count"], military_count)
         region["spike_flag"] = 1
 
-    for lat, lon, appearances, total_aircraft, military_presence in recurring_regions(cursor):
+    for lat, lon, appearances, total_aircraft, military_presence in recurring_rows:
         region = get_region(lat, lon)
         region["aircraft_count"] = max(region["aircraft_count"], total_aircraft)
         region["military_count"] = max(region["military_count"], military_presence)
@@ -322,12 +326,17 @@ def main():
 
     # Collect detection outputs for the intelligence layer
     _recurring   = recurring_regions(cursor)
-    rank_regions(cursor)
+    _coordinated = coordinated_activity(cursor)
+    _spikes      = detect_spikes(cursor)
+    rank_regions(
+        cursor,
+        coordinated_rows=_coordinated,
+        spike_rows=_spikes,
+        recurring_rows=_recurring,
+    )
     _new_entries = detect_new_entries(cursor)
     _movements   = detect_movements(cursor)
     _staging, _projection = detect_staging_and_projection(cursor)
-    _coordinated = coordinated_activity(cursor)
-    _spikes      = detect_spikes(cursor)
     _changes     = detect_activity_changes(cursor) or []
     detect_linked_regions(cursor)
 

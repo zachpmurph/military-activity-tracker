@@ -2289,6 +2289,142 @@ class MonitoringExportTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_export_monitoring_snapshot_writes_latest_validation_report_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "monitoring.db"
+            conn, cursor = init_db(str(db_path))
+            try:
+                reports = [
+                    {
+                        "source_name": "adsb",
+                        "source_tier": "primary_live",
+                        "started_at": 100.0,
+                        "finished_at": 101.0,
+                        "status": "success",
+                        "latency_seconds": 1.0,
+                        "item_count": 8,
+                        "error_reason": "",
+                    },
+                    {
+                        "source_name": "aisstream",
+                        "source_tier": "primary_live",
+                        "started_at": 100.0,
+                        "finished_at": 102.0,
+                        "status": "missing_credentials",
+                        "latency_seconds": 2.0,
+                        "item_count": 0,
+                        "error_reason": "AIS_API_KEY not set",
+                    },
+                ]
+                region = RegionIntelligence(
+                    lat=25.0,
+                    lon=45.0,
+                    classification=Classification.STAGING,
+                    confidence=84,
+                    score=74.0,
+                    all_scores={
+                        "STAGING": 74.0,
+                        "PROJECTION": 28.0,
+                        "ROUTINE": 6.0,
+                        "ANOMALY": 58.0,
+                        "COORDINATED_ACTIVITY": 61.0,
+                    },
+                    features=RegionFeatures(
+                        lat=25.0,
+                        lon=45.0,
+                        aircraft_count=8,
+                        military_count=4,
+                        recurring_appearances=4,
+                        spike_flag=True,
+                        coordination_flag=True,
+                        staging_flag=True,
+                        new_aircraft=5,
+                        change_score=26.0,
+                        change_level="HIGH",
+                    ),
+                    explanation="persistent military buildup with outbound movement",
+                )
+
+                persist_source_runs(cursor, reports)
+                persist_monitoring_state(
+                    cursor,
+                    [region],
+                    [(25.0, 45.0, 27.0, 47.0, 4, 2, 1.6, 9.0)],
+                    reports,
+                    snapshot_time=100.0,
+                )
+                cursor.execute(
+                    """
+                    UPDATE current_region_state
+                    SET evidence_summary = ?
+                    """,
+                    (
+                        json.dumps(
+                            {
+                                "explanation": "persistent military buildup with outbound movement",
+                                "region_type": "CIVILIAN_HEAVY",
+                            },
+                            sort_keys=True,
+                        ),
+                    ),
+                )
+                conn.commit()
+
+                export_paths = export_monitoring_snapshot(cursor, Path(tmpdir) / "exports", 100.0)
+
+                self.assertIn("validation_report", export_paths)
+                payload = json.loads(Path(export_paths["validation_report"]).read_text(encoding="utf-8"))
+                self.assertEqual(payload["generated_at"], 100.0)
+                self.assertEqual(payload["metrics"]["civilian_heavy_visible_region_count"], 1)
+                self.assertEqual(payload["metrics"]["degraded_primary_live_source_count"], 1)
+                self.assertEqual(payload["metrics"]["visible_route_experimental_only_count"], 0)
+                self.assertGreaterEqual(payload["metrics"]["critical_visible_alert_count_under_degradation"], 1)
+                self.assertEqual(payload["checks"]["civilian_heavy_visible_regions"], "warn")
+                self.assertEqual(payload["checks"]["degraded_primary_live_sources"], "warn")
+                self.assertEqual(payload["checks"]["experimental_only_visible_routes"], "pass")
+                self.assertEqual(payload["checks"]["critical_alerts_under_degradation"], "warn")
+                self.assertIn("AIS_API_KEY", payload["summary"]["headline"])
+                self.assertIn("restore_primary_live_sources", payload["recommended_actions"])
+                self.assertIn("review_civilian_noise_thresholds", payload["recommended_actions"])
+                self.assertIn("validate_critical_alerts_under_degradation", payload["recommended_actions"])
+            finally:
+                conn.close()
+
+    def test_export_monitoring_snapshot_validation_report_warns_on_experimental_only_visible_routes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "monitoring.db"
+            conn, cursor = init_db(str(db_path))
+            try:
+                reports = [
+                    {
+                        "source_name": "satellite",
+                        "source_tier": "experimental",
+                        "started_at": 100.0,
+                        "finished_at": 101.0,
+                        "status": "success",
+                        "latency_seconds": 1.0,
+                        "item_count": 3,
+                        "error_reason": "",
+                    }
+                ]
+                persist_monitoring_state(
+                    cursor,
+                    [],
+                    [(25.0, 45.0, 27.0, 47.0, 3, 1, 1.6, 8.0)],
+                    reports,
+                    snapshot_time=100.0,
+                )
+                conn.commit()
+
+                export_paths = export_monitoring_snapshot(cursor, Path(tmpdir) / "exports", 100.0)
+                payload = json.loads(Path(export_paths["validation_report"]).read_text(encoding="utf-8"))
+
+                self.assertEqual(payload["metrics"]["visible_route_experimental_only_count"], 1)
+                self.assertEqual(payload["checks"]["experimental_only_visible_routes"], "warn")
+                self.assertIn("review_experimental_route_weighting", payload["recommended_actions"])
+            finally:
+                conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

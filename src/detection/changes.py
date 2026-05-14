@@ -16,6 +16,9 @@ _MIN_CIVILIAN_SCORE = 6.0
 _PERSISTENCE_BONUS = 2.0
 _MILITARY_BONUS_THRESHOLD = 5
 _MILITARY_BONUS = 3.0
+_CIVILIAN_PROMOTION_MIN_AIRCRAFT = 75
+_CIVILIAN_PROMOTION_MAX_MILITARY_PCT = 5.0
+_CIVILIAN_PROMOTION_MAX_MILITARY_DELTA = 1
 
 _LEVEL_HIGH = 22.0
 _LEVEL_MEDIUM = 16.0
@@ -132,6 +135,7 @@ def detect_activity_changes(cursor, include_breakdown=False):
 
     results        = []
     fill_candidates = []
+    suppressed_rows = []
 
     t0 = time.time()
     for region in sorted(recent_regions, key=lambda r: r["aircraft_count"], reverse=True):
@@ -269,6 +273,17 @@ def detect_activity_changes(cursor, include_breakdown=False):
             region_type,
         )
 
+        suppress_civilian_promotion = (
+            region_type == "CIVILIAN_HEAVY"
+            and region_aircraft >= _CIVILIAN_PROMOTION_MIN_AIRCRAFT
+            and percent_military <= _CIVILIAN_PROMOTION_MAX_MILITARY_PCT
+            and military_delta <= _CIVILIAN_PROMOTION_MAX_MILITARY_DELTA
+        )
+
+        if suppress_civilian_promotion:
+            suppressed_rows.append(row)
+            continue
+
         if change_score >= _CHANGE_SCORE_THRESHOLD:
             results.append(row)
         else:
@@ -294,6 +309,7 @@ def detect_activity_changes(cursor, include_breakdown=False):
             medium_rows.append(r)
         else:
             low_rows.append(r)
+    low_rows.extend(sorted(suppressed_rows, key=lambda r: r[2]))
 
     for row in high_rows:
         print(row)
